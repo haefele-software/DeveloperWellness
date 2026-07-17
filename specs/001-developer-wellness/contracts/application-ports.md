@@ -42,7 +42,7 @@ public interface IAiInsightService
 - `IsAvailable` is false when unconfigured; every UI surface degrades to the friendly unavailable state and the roster notes absent tone signals (FR-014, SC-009).
 - `SummariseAsync` MUST honour the roughly 120-word bound and supportive wording (FR-015 to FR-017); failures throw `AiInsightException` with a user-presentable message.
 - `ClassifyToneAsync` returns one `ToneClass` per input in order; unparseable results map to `Unanalysed` (never `Negative`). Partial batch failure returns the classified prefix so the UI can state analysed-versus-total (FR-020).
-- Implementations: `FoundryAiInsightService` (`IChatClient` from Microsoft.Extensions.AI over Azure.AI.OpenAI, research R3), `DemoAiInsightService` (canned outputs, research R5).
+- Implementations: `FoundryAiInsightService` (`IChatClient` from Microsoft.Extensions.AI over Azure.AI.OpenAI against the Foundry model deployment, API-key auth, app-owned instructions, research R3), `DemoAiInsightService` (canned outputs, research R5).
 
 ## Application services (orchestration, thin)
 

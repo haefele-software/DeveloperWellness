@@ -17,7 +17,7 @@
 ## Phase 1: Setup (Shared Infrastructure)
 
 - [ ] T001 Create `DeveloperWellness.slnx` with projects `src/DeveloperWellness.Domain`, `src/DeveloperWellness.Application`, `src/DeveloperWellness.Infrastructure`, `src/DeveloperWellness.Web` (Blazor Server), `tests/DeveloperWellness.UnitTests` (xUnit), `tests/DeveloperWellness.IntegrationTests` (xUnit); references: Application→Domain, Infrastructure→Application, Web→Application+Infrastructure, tests→respective sources per plan.md
-- [ ] T002 Add NuGet packages: `Octokit`, `Microsoft.Extensions.AI`, `Microsoft.Extensions.AI.OpenAI`, `Azure.AI.OpenAI` to `src/DeveloperWellness.Infrastructure/DeveloperWellness.Infrastructure.csproj`; `Microsoft.AspNetCore.Mvc.Testing` to `tests/DeveloperWellness.IntegrationTests/DeveloperWellness.IntegrationTests.csproj`
+- [ ] T002 Add NuGet packages: `Octokit`, `Microsoft.Extensions.AI`, `Microsoft.Extensions.AI.OpenAI`, `Azure.AI.OpenAI` to `src/DeveloperWellness.Infrastructure/DeveloperWellness.Infrastructure.csproj` (research R3: model deployment with API-key auth); `Microsoft.AspNetCore.Mvc.Testing` to `tests/DeveloperWellness.IntegrationTests/DeveloperWellness.IntegrationTests.csproj`
 - [ ] T003 [P] Create repo-root `.gitignore` (.NET patterns) and `src/DeveloperWellness.Web/appsettings.json` with `Wellness` defaults from data-model.md (DemoMode true, working hours 09:00-18:00 Mon-Fri, OrganisationTimeZone, OutOfHoursThreshold 0.25, MinPrEvents 3, SpreadThinThreshold 4, NegativeToneThreshold 0.20, MinAnalysedComments 10, ChangesRequestedThreshold 0.40, MinPrSample 3, RepoCap 10, BranchCap 20, ToneCommentCap 200, TrendWeeks 12, PeriodDaysDefault 14)
 
 ---
@@ -131,11 +131,11 @@
 
 ## Phase 10: User Story 7 - AI project summary (Priority: P7)
 
-**Goal**: On-request grounded project summary via the Foundry GPT deployment behind `IChatClient`
+**Goal**: On-request grounded project summary via the Foundry model deployment (`IChatClient`, API-key auth, app-owned instructions)
 
 **Independent Test**: Quickstart scenario 7 (project half): under 10 seconds or unavailable state; roughly 120 words; exact AI label; session cache on repeat
 
-- [ ] T033 [P] [US7] `FoundryAiInsightService` implementing `SummariseAsync` and `IsAvailable` via `IChatClient` (Microsoft.Extensions.AI over Azure.AI.OpenAI per research R3; supportive prompt, roughly 120-word bound) plus `AiOptions` and DI registration in `src/DeveloperWellness.Infrastructure/Ai/FoundryAiInsightService.cs`, `src/DeveloperWellness.Infrastructure/Ai/AiOptions.cs`
+- [ ] T033 [P] [US7] `FoundryAiInsightService` implementing `SummariseAsync` and `IsAvailable` via `IChatClient` (Microsoft.Extensions.AI over Azure.AI.OpenAI against the Foundry model deployment per research R3; API-key auth from `Ai:ApiKey`, no interactive sign-in; app-owned supportive system prompt with the roughly 120-word bound) plus `AiOptions` and DI registration in `src/DeveloperWellness.Infrastructure/Ai/FoundryAiInsightService.cs`, `src/DeveloperWellness.Infrastructure/Ai/AiOptions.cs`
 - [ ] T034 [P] [US7] `DemoAiInsightService` (canned deterministic summaries and tone results for the seeded dataset; no network) in `src/DeveloperWellness.Infrastructure/Demo/DemoAiInsightService.cs`
 - [ ] T035 [US7] `AiSummaryService` (builds `SummaryGrounding` from aggregates only per FR-022, session caching per FR-021) in `src/DeveloperWellness.Application/Services/AiSummaryService.cs`
 - [ ] T036 [US7] `AiSummaryPanel` shared component (idle "Nothing runs until you ask", loading "usually under 10 seconds", ready with label `AI-generated · {scope} · last {N} days` and Refresh, down, no-activity states) per ui-design.md 4.4/4.5 in `src/DeveloperWellness.Web/Components/Shared/AiSummaryPanel.razor`, integrated into `src/DeveloperWellness.Web/Components/Pages/ProjectDetail.razor`
@@ -158,7 +158,7 @@
 
 **Independent Test**: Quickstart scenario 8: seeded frustrated developer's roster entry carries the frustration reason with analysed-sample note; Overview sentiment reading shows the distribution; no per-comment verdicts anywhere
 
-- [ ] T038 [US9] Tone classification: batched `ClassifyToneAsync` (25 per call, strict JSON, unparseable → `Unanalysed`, partial-prefix return per FR-020) in `src/DeveloperWellness.Infrastructure/Ai/FoundryAiInsightService.cs` and canned tone results in `src/DeveloperWellness.Infrastructure/Demo/DemoAiInsightService.cs` (same files as T033/T034: run after Phase 10)
+- [ ] T038 [US9] Tone classification: batched `ClassifyToneAsync` (25 comments per chat call against the same deployment, strict JSON array demanded, unparseable → `Unanalysed`, partial-prefix return per FR-020) in `src/DeveloperWellness.Infrastructure/Ai/FoundryAiInsightService.cs` and canned tone results in `src/DeveloperWellness.Infrastructure/Demo/DemoAiInsightService.cs` (same files as T033/T034: run after Phase 10)
 - [ ] T039 [P] [US9] `ToneAggregator` (per-author distributions with the 10-analysed-comments guard per FR-019, 20 percent threshold, analysed-versus-total figures, plus the organisation-level `SentimentReading` per FR-039) with unit tests in `src/DeveloperWellness.Domain/Signals/ToneAggregator.cs` and `tests/DeveloperWellness.UnitTests/ToneAggregatorTests.cs`
 - [ ] T040 [US9] `ToneAnalysisService` (most-recent-first selection with ToneCommentCap, aggregate building, aggregates cached per scope and period per FR-021) in `src/DeveloperWellness.Application/Services/ToneAnalysisService.cs`
 - [ ] T041 [US9] Tone surfacing: frustration mentions into check-in reasons (design wording, analysed-sample note) in `src/DeveloperWellness.Application/Services/CheckInService.cs` and the roster frustration paragraph in `src/DeveloperWellness.Web/Components/Pages/CheckIns.razor`; sentiment reading into `src/DeveloperWellness.Application/Services/OverviewService.cs` and the Overview sentiment tile and panel in `src/DeveloperWellness.Web/Components/Pages/Overview.razor`; no tone page or route (FR-018)

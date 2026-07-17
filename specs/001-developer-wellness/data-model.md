@@ -110,7 +110,7 @@ All computed by pure Domain functions from an `ActivityDataset` plus `WellnessOp
 | Options record | Keys and defaults |
 |----------------|-------------------|
 | `GitHubOptions` | `Organisation` (required in live mode), `Token` (secret, required in live mode) |
-| `AiOptions` | `Endpoint`, `ApiKey` (secret), `DeploymentName`; all optional, absence = AI unavailable state (FR-014) |
+| `AiOptions` | `Endpoint`, `ApiKey` (secret), `DeploymentName`; all optional, absence = AI unavailable state (FR-014). API-key authentication only; start-up never requires interactive sign-in (research R3) |
 | `WellnessOptions` | `DemoMode = true` (R5); `WorkingHoursStart = 09:00`, `WorkingHoursEnd = 18:00`, working days Monday to Friday; `OrganisationTimeZone` (IANA or Windows id, required); `OutOfHoursThreshold = 0.25`; `MinPrEvents = 3`; `SpreadThinThreshold = 4`; `NegativeToneThreshold = 0.20`; `MinAnalysedComments = 10`; `ChangesRequestedThreshold = 0.40`; `MinPrSample = 3`; `RepoCap = 10`; `BranchCap = 20`; `ToneCommentCap = 200`; `TrendWeeks = 12`; `PeriodDaysDefault = 14` |
 
 Validation rules: thresholds in (0, 1]; caps >= 1; working hours start before end; unknown timezone id fails start-up with a clear message (FR-033, FR-011).

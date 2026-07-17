@@ -33,5 +33,5 @@
 
 - This spec consolidates the former specs 001-dev-wellness-dashboard, 002-ai-insights, and 003-checkin-signals into a single specification at the user's request (2026-07-17). All functional requirements, clarifications (7 recorded), guardrails, and success criteria from the three sources are preserved; requirement numbering is FR-001 to FR-034 and success criteria SC-001 to SC-013.
 - Both prior clarification sessions' decisions are carried forward in the Clarifications section: all-branches commit counting, demo mode, 25-repository coverage cap, author-local timezone with organisation fallback, all-members roster, in-app alert only (no external messaging), and the two-condition possible-rushing rule.
-- Technology choices from the user's inputs (Blazor Server, Clean Architecture, GitHub organisation account, Microsoft Foundry with a GPT model via Microsoft.Extensions.AI) are deliberately excluded from the spec body and belong to `/speckit-plan`.
+- Technology choices from the user's inputs (Blazor Server, Clean Architecture, GitHub organisation account, the Microsoft Foundry model deployment consumed via Microsoft.Extensions.AI with API-key authentication) are deliberately excluded from the spec body and belong to `/speckit-plan`.
 - Validation passed on the first iteration for the consolidated document.

@@ -5,7 +5,7 @@
 ## Prerequisites
 
 - .NET 10 SDK
-- Nothing else for demo mode. Live mode additionally needs a GitHub fine-grained personal access token (read-only: organisation members, teams (`read:org`), repository contents metadata, pull requests) and a Microsoft Foundry (Azure OpenAI) deployment of a GPT model.
+- Nothing else for demo mode. Live mode additionally needs a GitHub fine-grained personal access token (read-only: organisation members, teams (`read:org`), repository contents metadata, pull requests) and a Microsoft Foundry (Azure OpenAI) model deployment with its API key.
 
 ## Run in demo mode (zero configuration)
 
@@ -27,12 +27,12 @@ dotnet user-secrets set "GitHub:Organisation" "<your-org>"
 dotnet user-secrets set "GitHub:Token" "<fine-grained-pat>"
 dotnet user-secrets set "Ai:Endpoint" "https://<resource>.openai.azure.com/"
 dotnet user-secrets set "Ai:ApiKey" "<key>"
-dotnet user-secrets set "Ai:DeploymentName" "<gpt-deployment>"
+dotnet user-secrets set "Ai:DeploymentName" "<model-deployment>"
 dotnet user-secrets set "Wellness:DemoMode" "false"
 dotnet user-secrets set "Wellness:OrganisationTimeZone" "South Africa Standard Time"
 ```
 
-Restart the app. AI settings are optional: leaving them unset runs the dashboard with AI panels in their friendly unavailable state (FR-014).
+AI authentication is the configured API key; starting the application never requires interactive sign-in (research R3). Restart the app. AI settings are optional: leaving them unset runs the dashboard with AI panels in their friendly unavailable state (FR-014).
 
 ## Validation scenarios
 
