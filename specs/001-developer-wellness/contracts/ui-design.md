@@ -1,118 +1,98 @@
-# Design Brief: Developer Wellness Platform
+# Design Contract: Pulse
 
-Give this document to a design session (Claude or otherwise) together with your current design. The task it defines: **adjust the existing design so that every screen, state, and word below is satisfied**. The consolidated specification at `specs/001-developer-wellness/spec.md` is the source of truth; where this brief and the spec disagree, the spec wins, and where your current design disagrees with either, the design changes.
-
-Requirement references (FR-xxx, SC-xxx) point at the spec so every design decision stays traceable.
-
----
+**Source of truth**: the approved Pulse design export (`Pulse Dashboard.html`, a Claude design artefact; decoded structure summarised here). This contract binds implementation; where a screen detail is not stated here, follow the design export. Requirement references point at `../spec.md`.
 
 ## 1. Product in one paragraph
 
-A dashboard for engineering leads that reads an organisation's GitHub activity and answers one caring question: **who needs a check-in right now, and why?** It shows per-developer activity (commits, reviews, comments), overwork signals (out-of-hours commits and PR activity), spread (projects in flight), review climate (comment tone), and rushing (volume outpacing review quality), with short AI summaries of any project or person. It is a care instrument, not a surveillance tool, and the design must feel that way.
+Pulse ("Pulse — Developer wellness") reads an organisation's GitHub activity and answers one caring question: **who needs a check-in right now, and why?** It opens on an at-a-glance Overview (KPI tiles, projects table, team cards, manager recommendations, development trend, review sentiment), with a Team overview table, a check-in roster, quality-versus-quantity, and per-person and per-project detail one click away. It is a care instrument, not a surveillance tool: the application exists to look after developers, never to control them.
 
 ## 2. Design principles (binding)
 
-1. **Supportive, never accusatory.** Flags are conversation prompts, not verdicts. Microcopy says "might be worth a check-in", never "underperforming", "problem", or "offender". No leaderboards, no rankings, no composite person scores (FR-029).
-2. **Every flag explains itself.** A flag is never an icon alone; it always carries or reveals a plain-language reason ("6 of 20 commits landed after 22:00 in their local time this fortnight") (FR-028, SC-010).
-3. **Calm visual temperament.** Attention states use warm, measured emphasis, not alarm styling. Red-as-danger is reserved for system errors, never for people.
-4. **Honest data.** Every view states its scope, period, and coverage ("14 days, 25 most recently active repositories") (FR-007). AI content is always labelled as AI-generated with its scope and period (FR-017, SC-006). Bounded analyses state their bounds ("analysed 200 of 340 comments") (FR-020).
-5. **Never blocked, never blank.** Every data surface has designed loading, empty, partial, and error states (FR-011). AI being down never dims the rest of the dashboard (FR-014, SC-009).
-6. **Accessible.** Flags are never conveyed by colour alone (pair icon plus text). Contrast meets WCAG AA. All interactive elements are keyboard reachable.
+1. **Supportive, never accusatory.** Flags are conversation prompts, not verdicts; the roster says people "might need" a check-in. No leaderboards, no composite person scores, no ranking of people (FR-029). Projects may be ordered by activity; people may not.
+2. **Every flag explains itself** with the design's reason pattern: observation, context, gentle suggestion (for example: "13 of 34 commits (38%) landed out of hours in their local time over the last 14 days. It might be worth a quiet check-in about workload.").
+3. **Calm visual temperament.** Fluent-like light UI, accent blue `#0f6cbd`, attention in warm amber (`#8a3707` text, `#c48733` bars), never alarm red for people.
+4. **Honest data.** The persistent coverage line states scope, repository bound, period, data load time, and demo marker (FR-007). AI outputs carry the exact label `AI-generated · {scope} · last {N} days` (FR-017). Bounded analyses state their sample.
+5. **Never blocked, never blank.** Credentials missing → full-page connect state; rate limited → banner, data kept, automatic retry (FR-011). AI down → quiet local unavailable states (FR-014). Loading → skeleton rows.
+6. **Accessible.** Flags pair icon plus label plus hover reason; no colour-only signals; WCAG AA contrast; keyboard reachable.
 
-## 3. Global shell
+## 3. Global shell (every page)
 
-Present on every screen:
-
-- **App header** with product name and, when demo mode is on, a clearly visible "Demo data" badge; demo content uses obviously fictitious identities (FR-013).
-- **Scope switcher**: organisation (default) or a single project. Organisation scope states its coverage: "Covering the 25 most recently active repositories" (FR-007).
-- **Period selector**: 7, 14 (default), or 30 days (FR-009). Changing scope or period recalculates every view without any reconfiguration (SC-003).
-- **Check-in alert indicator**: a prominent badge showing the count of developers newly needing a check-in in the selected scope and period; one click opens the check-in roster. It clears once the roster is viewed and reappears only when a further developer becomes flagged (FR-030, FR-031, SC-011). One indicator, one count; alerts never stack.
-- **Data freshness line**: when live data cannot refresh, the last loaded data stays visible with its load time (FR-011).
+- **Brand**: "Pulse — Developer wellness". Nav: Overview, Team overview, Check-in roster (with live count badge), Quality vs quantity, Project detail. Developer detail is a drill-in with a back link, not a nav item.
+- **Status chips**: connection dot and text ("SignalR connected" green; "GitHub paused (rate limit)" amber), freshness text ("GitHub sync 2 min ago" / "Data as of today 09:42"), runtime badge ("Blazor Server · .NET {actual runtime version}"), lead persona chip.
+- **Demo banner** when demo mode is on: "Demo data — fictitious identities" (FR-013).
+- **Alert pill** (FR-030, FR-031): "{N} people newly need a check-in", click opens the roster and marks seen; seen-state is keyed per scope and period within the session.
+- **Scope selector** (Organisation plus each covered repository) and **period buttons** (7, 14, 30 days). Every change recomputes with a brief skeleton state.
+- **Coverage line**: "{Scope} · covering the 10 most recently active repositories · last {N} days · data loaded {time} · demo data".
 
 ## 4. Screens
 
-### 4.1 Team overview (landing)
+### 4.1 Overview (landing, `/`) — FR-035..FR-039
 
-The per-developer activity table for the selected scope and period (FR-002 to FR-004, FR-008):
+Headline "{Scope} at a glance" with "Open the check-in roster →".
 
-- Columns: developer, commits, PR reviews (each submitted review counts separately), comments, out-of-hours commit share, out-of-hours PR share, projects in flight (organisation scope only), flags.
-- Wellbeing flags render as labelled chips: Overwork (commits), Overwork (PR activity), Spread thin, Tone, Possible rushing. Each chip reveals its reason on hover or tap.
-- **No-activity group**: members with no recorded activity sit in a separate, visually quieter group with zero counts; they are never dropped (FR-012). An "unmatched activity" bucket collects events that cannot be attributed (edge case).
-- Sorting affordances are fine, but the default order must not read as a performance ranking; default to alphabetical within flagged and unflagged groupings.
+- **KPI tiles**: Might need a check-in (count, note "{n} new since roster last viewed"); After-hours commits (weighted share, note "threshold 25% · author-local time"); After-hours PR activity (note "organisation time"); Projects per developer (note "spread-thin from 4 concurrent") or Contributors when project-scoped; Review sentiment ("{neg}% negative", note "{pos}% positive · tone flag from 20%") or an em-dash tile noting "tone service unavailable".
+- **Projects table** ("overall stats per project · click one to open its detail"): Project, People, Commits, PRs, Reviews, Comments, After-hours (bar, amber above 25 percent), Signals ("{n} people carry a signal here" in amber, or "quiet"); ordered by commits; row click switches scope to that project and opens project detail.
+- **Teams** ("click a card for the full table · flags open the person"): one card per team: name, "{n} devs", activity sparkline, bars for After-hours, Projects in flight, Reviews per dev (amber above their attention levels), and up to three most-flagged member chips linking to the person (FR-036).
+- **Recommendations for managers** ("drawn from active signals — suggestions, not instructions"): up to six flagged people, avatar, name, team, action from leading signal (Encourage real time off / Nudge reviews back into the day / Rebalance project load / Check in on review climate / Ease the pace pressure), short reason, "Open →". Empty state: "No recommendations this period — signals are quiet across the board." (FR-037).
+- **Development trend**: 12-week sparkline plus "{Commit activity is up ~X% across the window}" with the steep-ramp caution when above 25 percent, and the note that the series is weekly relative commits (FR-038).
+- **Review sentiment**: distribution bar (positive, neutral, negative) plus "{pos}% positive · {neu}% neutral · {neg}% negative across analysed comments. Tone concerns surface on the check-in roster, never per comment." Unavailable note when AI is off (FR-039).
 
-### 4.2 Developer detail
+### 4.2 Team overview (`/team`) — FR-002..FR-012
 
-- Header: developer identity, period, scope, flags with reasons.
-- **Time-of-commit distribution**: commits across hours and weekdays, evaluated in the author's local time (state this basis in a caption), out-of-hours share against the 25 percent threshold (FR-005, FR-006).
-- PR after-hours share with its caption: evaluated in the organisation timezone because PR events carry no author-local offset (FR-024, FR-025).
-- **AI summary panel**: on-request generation (never automatic on page load), at most roughly 120 words, supportive wording, marked "AI-generated · [scope] · [period]" (FR-016, FR-017). States: idle (button), loading (target under 10 seconds, SC-005), ready (with refresh affordance; results are session-cached per FR-021), unavailable (friendly message, rest of page unaffected), no-activity (plain statement, no speculation).
+- Headline mirrors the roster headline ("{N} people might need a check-in" / positive empty), with "View the roster →" and the caption "Default order: flagged first, then alphabetical — never a ranking".
+- Sortable columns: Developer, Commits, PR reviews, Comments, OOH commits, OOH PRs, Projects (organisation scope only), Flags. After-hours cells go amber and bold above 25 percent.
+- **No-activity group**: "No recorded activity this period" rows with "No activity — still part of the team".
+- **Unmatched line**: "Unmatched activity: {explanation, counted here, never against anyone}".
+- Footer captions: author-local versus organisation-timezone basis; "Flags are conversation prompts, not verdicts — hover any flag for its reason."
 
-### 4.3 Project detail
+### 4.3 Check-in roster (`/checkins`) — FR-026..FR-028, FR-018..FR-020
 
-- Project activity summary for the period, contributors, flags present within this scope.
-- **AI project summary panel**: identical mechanics to 4.2 (FR-015).
+- Headline "{N} people might need a check-in"; sub "{Scope} · last {N} days · ordered by number of concurrent signals" plus, at project scope, "project scope: spread-thin isn't assessed here".
+- When AI is off: "Tone signals are currently unavailable, so this roster reflects activity signals only."
+- **Frustration paragraph** when tone-flagged people exist: "There's some frustration showing in review comments: {names}' comments read more negative than usual this period. It's climate, not character — review pressure is usually the cause."
+- Entries: avatar, name, team, every flag with its full reason, "View {name}'s detail →".
+- Positive empty state: "Nobody appears to need a check-in right now. Across {coverage}, every signal sits in its normal range. That's the outcome this dashboard is for — enjoy it."
 
-### 4.4 Check-in roster
+### 4.4 Developer detail (drill-in) — FR-005, FR-006, FR-016, FR-024, FR-025
 
-The heart of the product (FR-026 to FR-028, SC-010):
+- Back link; header: name, "{team} · {scope} scope · last {N} days · active in {n} projects"; flags or "Signals steady".
+- Stat tiles: Commits ("{n} out of hours"), PR reviews given ("each submitted review counts"), Comments ("PRs and reviews"), PRs opened ("{cr}% saw changes requested" or "below review-data sample").
+- **Time of commits heatmap**: hours by weekday in the author's local time, working-hours cells in accent blue, out-of-hours in amber, legend "Within working hours (09–18, Mon–Fri) / Out of hours".
+- Out-of-hours commit and PR share bars with the 25 percent threshold marker and their timezone captions.
+- **AI summary panel** (FR-015..FR-017, FR-021): idle ("Generate a short, supportive summary… Nothing runs until you ask."), loading ("Summarising… usually under 10 seconds."), ready (text, exact AI label, Refresh), down ("The summary service isn't reachable right now. Everything else on this page is live…"), no-activity ("{name} recorded no activity in this period, so there's nothing to summarise.").
 
-- Headline: "N people might need a check-in" for the selected scope and period.
-- Ordered list, most concurrent flags first; each entry shows the developer, every active flag as a plain-language reason, and a link to their detail page.
-- At project scope, the roster covers that project's activity only, and the spread-thin signal is absent (not shown as zero); a short caption explains this.
-- When tone signals are unavailable (AI down or unconfigured), the roster states that tone signals are absent (SC-009).
-- **Positive empty state**: "Nobody appears to need a check-in right now" with a warm, affirming design; this state is a success, not an absence.
+### 4.5 Project detail (`/project/{name}`)
 
-### 4.5 Tone view
+- Header with contributor count; stat tiles (Commits, PRs opened, Reviews, Comments); Contributors list, flagged first, with activity line and flags; note "{n} of {m} carry a flag in this scope"; caption "Spread-thin isn't assessed at project scope — it only makes sense across the whole organisation."
+- AI project summary panel, identical mechanics to 4.4.
 
-- Aggregate tone distributions (positive, neutral, negative) per project and per comment author (FR-018).
-- Tone flags where negative share exceeds 20 percent (FR-019).
-- Analysed-versus-total statement whenever the 200-comment bound applies, and a partial-failure statement ("analysed 120 of 200 before the service became unavailable") (FR-020).
-- **Hard rule**: no individual comment is ever shown with a tone verdict, and no comment text is quoted with a classification (FR-018). Unanalysable comments count as "unanalysed", never as negative.
+### 4.6 Quality vs quantity (`/quality`) — FR-027, FR-029
 
-### 4.6 Quality versus quantity view
+- Sub "Volume beside rework proxies — no score, no index, no ranking. Shown only for people with at least 3 PRs this period."
+- Columns: Developer, Commits, PRs opened, Changes-requested share (amber above 40 percent), Avg review rounds, Signal ("Possible rushing" or "Volume and rework look in step").
+- Below-sample note: "Not enough review data to say anything useful: {names} — fewer than 3 PRs this period, which is perfectly normal."
+- Closing caption explaining the rushing rule reads as pace pressure, not carelessness.
 
-- Per developer with at least 3 PRs: volume (commits, PRs opened) side by side with rework proxies (changes-requested share, average review rounds per PR) (FR-027).
-- Developers below the sample: "Not enough review data to say anything useful", with no judgement styling.
-- The possible-rushing flag appears only when both conditions hold (above-median volume AND changes-requested share above 40 percent) and reads supportively: "High output with rising rework; possibly rushing".
-- **No composite score, index, or rank anywhere on this screen** (FR-029).
+## 5. Signal rules (as designed)
 
-## 5. States to design for every data surface
+| Flag | Rule | Guard |
+|------|------|-------|
+| Overwork (commits) | out-of-hours commit share > 25% (author-local) | — |
+| Overwork (PR activity) | out-of-hours PR share > 25% (organisation time) | >= 3 PR events (FR-025) |
+| Spread thin | >= 4 projects in flight | organisation scope only |
+| Tone | negative share > 20% of analysed authored comments | >= 10 analysed comments (FR-019); AI available |
+| Possible rushing | volume above median AND changes-requested share > 40% | >= 3 PRs opened |
 
-| State | Requirement |
-|-------|-------------|
-| Loading | Skeleton or progress, never a blank page |
-| Empty period | Plain statement that there was no activity (edge case) |
-| Credential missing or invalid | Clear, actionable setup message (edge case) |
-| Rate limited or service down | Problem stated; last loaded data kept visible with timestamp (FR-011) |
-| AI unavailable | Friendly message local to AI panels; everything else fully alive (FR-014, SC-009) |
-| Demo mode | Badge always visible; all views work identically (FR-013) |
+## 6. Explicitly out of scope (do not design or build)
 
-## 6. Voice and microcopy
+Sign-in and roles; external notifications; exports or sharing of AI content; any tone surface beyond the roster mention and the organisation-level sentiment reading (no tone page, no per-project tone, no per-comment verdicts); check-in follow-up workflow; historical trend targets.
 
-- Address the lead as a colleague; refer to developers respectfully by name.
-- Reasons follow the pattern: observation, context, gentle suggestion. Example: "8 of Developer A's 30 commits this fortnight landed after hours in their local time. It might be worth a quiet check-in."
-- Never: scores, grades, comparisons between named people, exclamation-mark urgency, or automated conclusions stated as fact ("is burnt out"). Always: "appears", "might", "worth a conversation".
-- AI labels use exactly: "AI-generated · [scope] · [period]".
-- Use fictitious identities (Developer A, Developer B) in all design mock-ups; never real names.
+## 7. Design acceptance checklist
 
-## 7. Explicitly out of scope (do not design)
-
-- Sign-in, user management, or roles (trusted internal tool).
-- External notifications of any kind: email, chat, push (in-app alert only, FR-032).
-- Exports, sharing, or copy-as-report of AI content (FR-023).
-- Per-comment tone display, tone excerpts, or tone timelines.
-- Historical trends beyond the selected period, check-in follow-up workflow (acknowledge, snooze), tickets completed (FR-034).
-
-## 8. Design acceptance checklist
-
-The adjusted design is complete when:
-
-- [ ] Every screen in section 4 exists with all states in section 5.
-- [ ] A lead can answer "how many people need a check-in and why" within 30 seconds of landing (SC-010) and spot the highest out-of-hours developers within 30 seconds (SC-002).
-- [ ] The alert indicator's appear, clear, and reappear lifecycle is designed (SC-011).
-- [ ] Every flag everywhere carries a plain-language reason (SC-010).
-- [ ] All AI content is labelled with the exact AI label pattern (SC-006).
-- [ ] Scope, period, and coverage statements are visible on every data view (FR-007).
-- [ ] No ranking, score, or per-comment tone verdict appears anywhere (FR-029, FR-018).
-- [ ] The demo-mode badge and fictitious identities are used in every mock-up (FR-013).
-- [ ] Flags are readable without colour perception and the design meets WCAG AA contrast.
+- [ ] All six screens in section 4 exist with credential-missing, rate-limited, loading, empty, AI-unavailable, and demo states.
+- [ ] The Overview renders KPI tiles, projects table, team cards, recommendations, trend, and sentiment at zero navigation clicks (SC-014).
+- [ ] Every flag everywhere carries the design's observation-context-suggestion reason (SC-010).
+- [ ] The AI label pattern is exactly `AI-generated · {scope} · last {N} days` on every AI output (SC-006).
+- [ ] The alert pill lifecycle (appear, clear on roster view, reappear; keyed per scope and period) works (SC-011).
+- [ ] No ranking or score of a person, no per-comment tone verdict, and no per-project tone appears anywhere (FR-029, FR-018).
+- [ ] Fictitious identities and the demo banner appear in demo mode (FR-013); flags are readable without colour perception; WCAG AA contrast.

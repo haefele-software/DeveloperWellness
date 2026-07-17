@@ -1,4 +1,4 @@
-# Implementation Plan: Developer Wellness Platform
+# Implementation Plan: Pulse, the Developer Wellness Platform
 
 **Branch**: `001-developer-wellness` | **Date**: 2026-07-17 | **Spec**: [spec.md](spec.md)
 
@@ -6,7 +6,7 @@
 
 ## Summary
 
-A Clean Architecture Blazor Server application (.NET 10, C# 14) that reads one GitHub organisation's activity read-only through an Octokit-based adapter, computes wellbeing signals (out-of-hours commits in author-local time, after-hours PR activity, spread-thin project counts, tone flags, possible rushing) as pure Domain functions driven by configurable thresholds, surfaces them on six Blazor routes centred on a check-in roster with a session-scoped in-app alert, and adds AI summaries and PR comment tone classification through a Microsoft Foundry GPT deployment behind the `IChatClient` abstraction of Microsoft.Extensions.AI. Two ports (`IActivitySource`, `IAiInsightService`) isolate all external services; deterministic demo-mode adapters (default on) make the whole product runnable and demonstrable with zero credentials. No persistence: session-scoped memory only. Build is time-boxed for a hackathon and structured so implementation tasks parallelise across multiple Sonnet 5 subagents along port and page seams.
+A Clean Architecture Blazor Server application (.NET 10, C# 14) that reads one GitHub organisation's activity read-only through an Octokit-based adapter, computes wellbeing signals (out-of-hours commits in author-local time, after-hours PR activity with a 3-event guard, spread-thin project counts, per-author tone with a 10-comment guard, possible rushing) as pure Domain functions driven by configurable thresholds, and surfaces them per the approved Pulse design on six Blazor routes: the Overview landing (KPI tiles, projects table, team cards, rule-based manager recommendations, a 12-week development trend from repository participation statistics, and an organisation-level review sentiment reading), Team overview, check-in roster, developer and project detail, and quality versus quantity, centred on the roster with a session-scoped in-app alert. AI summaries and tone classification run through a Microsoft Foundry GPT deployment behind the `IChatClient` abstraction of Microsoft.Extensions.AI. Two ports (`IActivitySource`, `IAiInsightService`) isolate all external services; deterministic demo-mode adapters (default on) make the whole product runnable and demonstrable with zero credentials. No persistence: session-scoped memory only. Build is time-boxed for a hackathon and structured so implementation tasks parallelise across multiple Sonnet 5 subagents along port and page seams.
 
 ## Technical Context
 
@@ -24,9 +24,9 @@ A Clean Architecture Blazor Server application (.NET 10, C# 14) that reads one G
 
 **Performance Goals**: First organisation summary within 2 minutes of setup (SC-001); AI summary within 10 seconds or friendly unavailable state (SC-005); check-in answer within 30 seconds of opening (SC-010); scope or period switch recomputes from cache without reconfiguration (SC-003).
 
-**Constraints**: Roughly 60-minute hackathon build; read-only GitHub access; session-only retention; bounded fetches (25 repositories, 20 branches per repository, 200 tone comments); demo mode must run with zero credentials and zero network access; no external messaging; no ranking or composite scores of developers.
+**Constraints**: Roughly 60-minute hackathon build; read-only GitHub access (PAT additionally needs `read:org` for teams); session-only retention; bounded fetches (10 repositories per the approved design, 20 branches per repository, 200 tone comments, 12 trend weeks via participation statistics); demo mode must run with zero credentials and zero network access; no external messaging; no ranking or composite scores of developers (projects may be ordered by activity).
 
-**Scale/Scope**: One organisation, tens of developers, 25 covered repositories per load, periods of 7/14/30 days, six UI routes, two external integrations. GitHub PAT rate limit 5000 requests per hour bounds worst-case fetch comfortably given the caps.
+**Scale/Scope**: One organisation, tens of developers, 10 covered repositories per load, periods of 7/14/30 days, six UI routes, two external integrations. GitHub PAT rate limit 5000 requests per hour bounds worst-case fetch comfortably given the caps.
 
 ## Constitution Check
 
@@ -59,7 +59,7 @@ DeveloperWellness.slnx
 src/
 ├── DeveloperWellness.Domain/            # Pure signal logic, no dependencies
 │   ├── Model/                           # Developer, Project, ActivityEvent hierarchy, ActivityDataset
-│   ├── Signals/                         # OutOfHours, SpreadThin, Rushing, ToneAggregation, CheckInComposition calculators
+│   ├── Signals/                         # OutOfHours, PrAfterHours, SpreadThin, Rushing, ToneAggregation, CheckInComposition, Recommendation, Trend, Sentiment calculators
 │   └── Options/                         # WellnessOptions + validation
 ├── DeveloperWellness.Application/       # Ports + thin orchestration services
 │   ├── Ports/                           # IActivitySource, IAiInsightService (+ exceptions)
@@ -70,7 +70,7 @@ src/
 │   └── Demo/                            # DemoActivitySource, DemoAiInsightService (fixed seed)
 └── DeveloperWellness.Web/               # Blazor Server
     ├── Components/Layout/               # Shell: scope switcher, period selector, demo badge, alert indicator, freshness line
-    ├── Components/Pages/                # Overview, DeveloperDetail, ProjectDetail, CheckIns, Tone, Quality
+    ├── Components/Pages/                # Overview (landing), TeamOverview, DeveloperDetail, ProjectDetail, CheckIns, Quality
     ├── Components/Shared/               # Flag chips, distribution bars, AI panel, state placeholders
     └── Program.cs                       # DI: demo/live adapter selection, options binding + validation
 

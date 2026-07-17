@@ -5,7 +5,7 @@
 ## Prerequisites
 
 - .NET 10 SDK
-- Nothing else for demo mode. Live mode additionally needs a GitHub fine-grained personal access token (read-only: organisation members, repository contents metadata, pull requests) and a Microsoft Foundry (Azure OpenAI) deployment of a GPT model.
+- Nothing else for demo mode. Live mode additionally needs a GitHub fine-grained personal access token (read-only: organisation members, teams (`read:org`), repository contents metadata, pull requests) and a Microsoft Foundry (Azure OpenAI) deployment of a GPT model.
 
 ## Run in demo mode (zero configuration)
 
@@ -15,7 +15,7 @@ Demo mode is the default (`Wellness:DemoMode = true`, research R5). From the rep
 dotnet run --project src/DeveloperWellness.Web
 ```
 
-Open the printed local address. Expected: the "Demo data" badge is visible, the team overview shows the fictitious roster, and no network calls leave the machine.
+Open the printed local address. Expected: the "Demo data — fictitious identities" badge is visible, the Pulse Overview shows fictitious KPI tiles, projects table, team cards, recommendations, trend, and sentiment, the Team overview shows the fictitious roster, and no network calls leave the machine.
 
 ## Configure live mode
 
@@ -40,16 +40,17 @@ Run each after the corresponding story lands. Demo mode makes all of them execut
 
 | # | Scenario | Steps | Expected outcome |
 |---|----------|-------|------------------|
-| 1 | Activity summary (P1, SC-001) | Open `/`, switch period 7/14/30 | Every roster member listed; counts change with period; no-activity group present; bots absent |
+| 1 | Activity summary (P1, SC-001) | Open `/team`, switch period 7/14/30 | Every roster member listed with sortable columns; counts change with period; no-activity group present; bots absent |
 | 2 | Overwork flags (P2) | Open the seeded overwork developer's detail | Time-of-commit distribution visible with author-local caption; overwork chip with plain-language reason |
 | 3 | Scope switch (P3, SC-003) | Select a single project, then organisation | Stats recompute per scope; coverage statement lists covered repositories; spread-thin flag on the seeded case at organisation scope only |
 | 4 | Check-in roster (P4, SC-010) | Open `/checkins` | Count headline; ordered list, most flags first; every entry has readable reasons; positive empty state when nothing is flagged |
 | 5 | Alert lifecycle (P5, SC-011) | Load with a seeded flagged developer; view roster; recompute | Indicator appears with count; clears after viewing; reappears only for a further newly flagged developer |
 | 6 | PR after-hours (P6) | Open the seeded late-reviewer's detail | Out-of-hours PR share visible with organisation-timezone caption; flag cites after-hours PR activity |
 | 7 | AI summaries (P7, P8, SC-005, SC-006) | Request project and developer summaries | Under 10 seconds or friendly unavailable message; text at most roughly 120 words; labelled "AI-generated · [scope] · [period]"; repeat request served from session cache |
-| 8 | Tone view (P9, SC-008) | Open `/tone` | Aggregate distributions per project and author; seeded negative project flagged; analysed-versus-total stated when the 200 cap applies; no per-comment verdicts anywhere |
+| 8 | Frustration signal (P9, SC-008) | With AI available (or demo mode), open `/checkins` | The seeded frustrated developer's entry carries a supportive frustration mention with analysed-sample note; no tone page, per-project tone stat, or per-comment verdict exists anywhere |
 | 9 | Quality versus quantity (P10) | Open `/quality` | Volume beside rework proxies; below-sample developers marked insufficient data; possible-rushing flag only on the seeded both-conditions case; no composite score |
 | 10 | Degradation (SC-009) | Unset AI settings in live mode, reload | All non-AI functions unchanged; roster states tone signals unavailable |
+| 11 | Pulse Overview (P11, SC-014) | Open `/` | KPI tiles, projects table, team cards, at least one recommendation, development trend, and sentiment reading visible with zero navigation; a projects-table row switches scope and opens project detail; Team overview and roster links work |
 
 ## Tests
 

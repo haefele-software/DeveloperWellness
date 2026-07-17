@@ -13,7 +13,9 @@ All technical unknowns from the Technical Context are resolved below. No NEEDS C
 ## R2. GitHub data access
 
 - **Decision**: Octokit (the official .NET GitHub client) against the GitHub REST API, authenticated with an organisation-scoped fine-grained personal access token supplied through configuration (user-secrets in development). Data retrieval per load, bounded by configuration:
-  - Repositories: organisation repositories ordered by last push, top `RepoCap` (default 25, FR-007).
+  - Repositories: organisation repositories ordered by last push, top `RepoCap` (default 10 per the approved Pulse design, FR-007).
+  - Teams (FR-036): organisation teams and their members via the Teams API (PAT needs `read:org`); first team alphabetically wins for multi-team members; missing permission degrades to a single no-team group with a quiet note.
+  - Development trend (FR-038): weekly commit counts per repository from the repository statistics participation endpoint (one call per covered repository, 52 weeks returned, last 12 used); avoids re-fetching commit history.
   - Commits on all branches (FR-002): list branches per repository (cap `BranchCap`, default 20, most recently updated first), then list commits per branch with `since` set to the period start; deduplicate by commit SHA across branches. Author identity from the commit author login where available, otherwise the "unmatched" bucket.
   - Time of commit (FR-005): the commit author date is a `DateTimeOffset` carrying the author's local offset; use it directly. When the offset is unusable, fall back to the configured organisation timezone.
   - Pull requests and reviews (FR-003, FR-024, FR-027): pull requests updated within the period; per PR, submitted reviews (each submission counts once) with state (approved, changes requested, commented) and `submitted_at`.
@@ -44,7 +46,7 @@ All technical unknowns from the Technical Context are resolved below. No NEEDS C
 
 ## R6. Signal computation
 
-- **Decision**: All signal logic (out-of-hours shares, spread-thin count, tone aggregation, possible-rushing rule, needs-check-in composition, alert state transitions) lives in the Domain project as pure, synchronous, allocation-light functions over the fetched dataset, driven by a strongly typed `WellnessOptions` (working hours, thresholds, caps, organisation timezone). Values per the spec: out-of-hours 25 percent, spread thin 4 projects, negative tone 20 percent, rushing above-median volume AND changes-requested share above 40 percent with minimum 3 PRs, repo cap 25, tone cap 200.
+- **Decision**: All signal logic (out-of-hours shares, spread-thin count, tone aggregation, possible-rushing rule, needs-check-in composition, alert state transitions, recommendation mapping, trend and sentiment composition) lives in the Domain project as pure, synchronous, allocation-light functions over the fetched dataset, driven by a strongly typed `WellnessOptions` (working hours, thresholds, caps, guards, organisation timezone). Values per the spec and approved design: working hours 09:00 to 18:00 Monday to Friday, out-of-hours 25 percent, after-hours PR flag minimum 3 PR events, spread thin 4 projects, negative tone 20 percent with minimum 10 analysed comments, rushing above-median volume AND changes-requested share above 40 percent with minimum 3 PRs, repo cap 10, branch cap 20, tone cap 200. Recommendation actions map from the leading flag kind exactly as the design defines (FR-037).
 - **Rationale**: Pure domain functions are trivially unit-testable, which is where the limited test budget buys the most confidence, and they honour FR-033's configurability requirement in one place.
 - **Alternatives considered**: Computing in the UI layer (untestable, violates Clean Architecture); computing during fetch in Infrastructure (couples signals to the data source and breaks demo-mode parity).
 

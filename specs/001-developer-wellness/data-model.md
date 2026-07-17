@@ -41,7 +41,7 @@ Common: `Author: DeveloperLogin or Unmatched`, `ProjectName: string`, `OccurredA
 Validation: `CommitEvent.Sha` unique per dataset; events outside the period are rejected at ingestion; unmatched authors group under a reserved `Unmatched` marker (edge case).
 
 ### ActivityDataset
-The fetch result for one scope and period: `Roster: IReadOnlyList<Developer>`, `Projects: IReadOnlyList<Project>`, `Events: IReadOnlyList<ActivityEvent>`, `CoveredProjectNames: IReadOnlyList<string>`, `LoadedAt: DateTimeOffset`, `IsDemoData: bool`. Cached by `(ScopeKey, Period)` (FR-021, R4); `LoadedAt` feeds the stale-data statement (FR-011).
+The fetch result for one scope and period: `Roster: IReadOnlyList<Developer>`, `Projects: IReadOnlyList<Project>`, `Teams: IReadOnlyList<Team>`, `Events: IReadOnlyList<ActivityEvent>`, `WeeklyCommitCounts: IReadOnlyList<int>` (trend input), `CoveredProjectNames: IReadOnlyList<string>`, `LoadedAt: DateTimeOffset`, `IsDemoData: bool`. Cached by `(ScopeKey, Period)` (FR-021, R4); `LoadedAt` feeds the freshness line and rate-limit banner (FR-011).
 
 ## Derived (computed) models
 
@@ -59,11 +59,30 @@ All computed by pure Domain functions from an `ActivityDataset` plus `WellnessOp
 - `Kind: FlagKind`, `Reason: string` (plain language, mandatory, SC-010)
 - Rules (FR-026): OverworkCommits when out-of-hours commit share > 25 percent; OverworkPrActivity when out-of-hours PR share > 25 percent; SpreadThin when distinct projects >= 4 (organisation scope only); NegativeTone when the developer's authored-comment negative share > 20 percent (only when tone available); PossibleRushing per QualityQuantitySnapshot rule.
 
-### ToneAggregate (per scope key: project or comment author)
+### ToneAggregate (per comment author only; never per project)
 - `Positive, Neutral, Negative, Unanalysed: int`
-- `AnalysedCount, TotalCount: int` (bound statement when `TotalCount > AnalysedCount`, FR-020)
+- `AnalysedCount, TotalCount: int` (analysed-sample note on the frustration mention when `TotalCount > AnalysedCount`, FR-020)
 - `NegativeShare: decimal` (over analysed only)
-- `Flagged: bool` (NegativeShare > 20 percent, FR-019)
+- `Flagged: bool` (NegativeShare > 20 percent, FR-019); its only consumer is the roster's frustration mention (FR-018)
+
+### OrganisationOverview (Pulse Overview snapshot, FR-035..FR-039)
+- `Kpis`: might-need-check-in count (+ new-since-viewed), after-hours commit share, after-hours PR share, projects per developer (or contributors when project-scoped), sentiment (or unavailable)
+- `ProjectRows: IReadOnlyList<ProjectRow>` where `ProjectRow` = `{ Name, People, Commits, PrsOpened, Reviews, Comments, AfterHoursShare, SignalNote }`, ordered by commits (projects may be ranked; people never)
+- `Teams: IReadOnlyList<TeamCard>` where `TeamCard` = `{ Name, Size, WeeklySeries, AfterHoursShare, AvgProjectsInFlight, AvgReviewsPerDev, TopFlagged (max 3) }`
+- `Recommendations: IReadOnlyList<Recommendation>` (max 6)
+- `Trend: DevelopmentTrend`, `Sentiment: SentimentReading`
+
+### Team (FR-036)
+- `Name: string`, `Members: IReadOnlyList<DeveloperLogin>`; source: organisation teams; multi-team members count under their first team alphabetically; no-team group for the rest
+
+### Recommendation (FR-037)
+- `Developer`, `TeamName`, `Action` (from leading flag kind: Encourage real time off / Nudge reviews back into the day / Rebalance project load / Check in on review climate / Ease the pace pressure), `Reason` (first sentences of flag reasons)
+
+### DevelopmentTrend (FR-038)
+- `WeeklyCommits: IReadOnlyList<int>` (up to 12 weeks), `ChangeStatement: string` (with steep-ramp caution above 25 percent)
+
+### SentimentReading (FR-039)
+- `Positive, Neutral, Negative: decimal` (organisation-level, across analysed comments), `Available: bool`
 
 ### QualityQuantitySnapshot (per developer)
 - `Commits, PrsOpened: int`
@@ -92,6 +111,6 @@ All computed by pure Domain functions from an `ActivityDataset` plus `WellnessOp
 |----------------|-------------------|
 | `GitHubOptions` | `Organisation` (required in live mode), `Token` (secret, required in live mode) |
 | `AiOptions` | `Endpoint`, `ApiKey` (secret), `DeploymentName`; all optional, absence = AI unavailable state (FR-014) |
-| `WellnessOptions` | `DemoMode = true` (R5); `WorkingHoursStart = 08:00`, `WorkingHoursEnd = 18:00`, working days Monday to Friday; `OrganisationTimeZone` (IANA or Windows id, required); `OutOfHoursThreshold = 0.25`; `SpreadThinThreshold = 4`; `NegativeToneThreshold = 0.20`; `ChangesRequestedThreshold = 0.40`; `MinPrSample = 3`; `RepoCap = 25`; `BranchCap = 20`; `ToneCommentCap = 200`; `PeriodDaysDefault = 14` |
+| `WellnessOptions` | `DemoMode = true` (R5); `WorkingHoursStart = 09:00`, `WorkingHoursEnd = 18:00`, working days Monday to Friday; `OrganisationTimeZone` (IANA or Windows id, required); `OutOfHoursThreshold = 0.25`; `MinPrEvents = 3`; `SpreadThinThreshold = 4`; `NegativeToneThreshold = 0.20`; `MinAnalysedComments = 10`; `ChangesRequestedThreshold = 0.40`; `MinPrSample = 3`; `RepoCap = 10`; `BranchCap = 20`; `ToneCommentCap = 200`; `TrendWeeks = 12`; `PeriodDaysDefault = 14` |
 
 Validation rules: thresholds in (0, 1]; caps >= 1; working hours start before end; unknown timezone id fails start-up with a clear message (FR-033, FR-011).

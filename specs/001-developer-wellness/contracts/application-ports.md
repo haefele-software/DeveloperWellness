@@ -16,7 +16,7 @@ public interface IActivitySource
 }
 ```
 
-- Returns the full dataset (roster, projects, events, covered project names, load time) for the scope and period per data-model.md.
+- Returns the full dataset (roster, projects, teams, events, weekly commit counts for the trend, covered project names, load time) for the scope and period per data-model.md.
 - MUST throw `ActivitySourceException` with a user-presentable message for credential, rate-limit, and connectivity failures (FR-011); callers keep the previous dataset visible.
 - MUST apply: repo cap and recently-active ordering (FR-007), branch cap with SHA deduplication (FR-002), bot exclusion (FR-010), full member roster (FR-012), unmatched-author bucketing (edge case).
 - Implementations: `GitHubActivitySource` (Octokit, research R2), `DemoActivitySource` (deterministic synthetic data, research R5). Selection by `WellnessOptions.DemoMode` at DI registration.
@@ -50,21 +50,25 @@ public interface IAiInsightService
 |---------|----------------|---------|
 | `DashboardQueryService` | Fetch-or-cache dataset, compute `ActivitySummary` list via Domain calculators | FR-002..FR-012, FR-021 |
 | `CheckInService` | Compose `CheckInStatus` roster and ordering from summaries plus tone | FR-026..FR-028 |
-| `ToneAnalysisService` | Select comments (cap, most recent first), call port 2, build `ToneAggregate`s | FR-018..FR-020 |
+| `ToneAnalysisService` | Select comments (cap, most recent first), call port 2, build per-author `ToneAggregate`s feeding roster frustration mentions only | FR-018..FR-020 |
+| `OverviewService` | Compose the `OrganisationOverview` snapshot (KPI tiles, project rows, team cards, recommendations, trend, sentiment) from summaries, check-in statuses, teams, and weekly commit counts | FR-035..FR-039 |
 | `QualityQuantityService` | Build `QualityQuantitySnapshot`s | FR-027, FR-029 |
+| `AiSummaryService` | Build `SummaryGrounding` from aggregates only, call port 2 summaries, session cache | FR-015..FR-017, FR-021, FR-022 |
 | `CheckInAlertService` (circuit-scoped) | Alert lifecycle per data-model.md transitions | FR-030, FR-031 |
 
 Every async method takes and propagates a `CancellationToken`. Failures surface as Result-style outcomes or typed exceptions mapped to the design brief's error states; exceptions are never used for ordinary control flow.
 
 ## UI surface (routes)
 
-| Route | Screen (design brief section) | Primary FRs |
-|-------|-------------------------------|-------------|
-| `/` | Team overview (4.1) | FR-002..FR-012 |
-| `/developer/{login}` | Developer detail (4.2) | FR-005, FR-006, FR-016, FR-024, FR-025 |
-| `/project/{name}` | Project detail (4.3) | FR-015 |
-| `/checkins` | Check-in roster (4.4) | FR-026..FR-028 |
-| `/tone` | Tone view (4.5) | FR-018..FR-020 |
+| Route | Screen (design contract section) | Primary FRs |
+|-------|----------------------------------|-------------|
+| `/` | Pulse Overview, landing (4.1) | FR-035..FR-039, SC-014 |
+| `/team` | Team overview (4.2) | FR-002..FR-012 |
+| `/checkins` | Check-in roster (4.3) | FR-026..FR-028, FR-018..FR-020 (frustration mention) |
+| `/developer/{login}` | Developer detail (4.4) | FR-005, FR-006, FR-016, FR-024, FR-025 |
+| `/project/{name}` | Project detail (4.5) | FR-015 |
 | `/quality` | Quality versus quantity (4.6) | FR-027, FR-029 |
+
+There is no tone route: tone surfaces only as the roster frustration mention and the Overview's organisation-level sentiment reading (FR-018, FR-039).
 
 Global shell elements (scope switcher, period selector, demo badge, alert indicator, freshness line) per design brief section 3 on every route. Visual and state requirements are contractual via [ui-design.md](ui-design.md).
