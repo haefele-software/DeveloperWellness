@@ -5,7 +5,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Lets UnitTests assert the pure retry-time computation behind the reset-aware retry scheduling (Fix B) without a timer or I/O. -->
+    <!-- Lets UnitTests assert the pure retry-time computation behind the reset-aware retry scheduling (Fix B)
+         without a timer or I/O, and drive DashboardQueryService's retry loop directly via TriggerRetryForTestAsync. -->
     <InternalsVisibleTo Include="DeveloperWellness.UnitTests" />
   </ItemGroup>
 

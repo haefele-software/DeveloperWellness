@@ -122,7 +122,7 @@ else
     private readonly CancellationTokenSource _cts = new();
 
     private DashboardResult? _lastResult;
-    private (string Name, int PeriodDays)? _loadedKey;
+    private (string Name, int PeriodDays, int DataVersion)? _loadedKey;
 
     /// <summary>The project name from the route (e.g. <c>/project/pulse-api-demo</c>).</summary>
     [Parameter]
@@ -140,8 +140,9 @@ else
         // This page always queries its own project scope (ScopeKey.Project(Name)) regardless of the
         // shell's currently selected scope, so the load key tracks (Name, PeriodDays) rather than
         // State.Scope: navigating between two projects, or the route Name changing, must refetch; a shell
-        // scope change alone (e.g. back to Organisation while this page stays open) must not.
-        var currentKey = (Name, State.PeriodDays);
+        // scope change alone (e.g. back to Organisation while this page stays open) must not. DataVersion
+        // is included so a background rate-limit retry succeeding still triggers a refetch here too.
+        var currentKey = (Name, State.PeriodDays, State.DataVersion);
 
         if (_loadedKey is null || !_loadedKey.Value.Equals(currentKey))
         {
@@ -159,7 +160,7 @@ else
 
     private void OnStateChanged()
     {
-        var currentKey = (Name, State.PeriodDays);
+        var currentKey = (Name, State.PeriodDays, State.DataVersion);
 
         if (_loadedKey is null || !_loadedKey.Value.Equals(currentKey))
         {
@@ -175,7 +176,7 @@ else
     {
         var name = Name;
         var periodDays = State.PeriodDays;
-        _loadedKey = (name, periodDays);
+        _loadedKey = (name, periodDays, State.DataVersion);
 
         var result = await QueryService.GetAsync(ScopeKey.Project(name), periodDays, _cts.Token);
 

@@ -223,7 +223,7 @@
     private readonly CancellationTokenSource _cts = new();
 
     private CheckInRosterResult? _lastResult;
-    private (ScopeKey Scope, int PeriodDays)? _loadedKey;
+    private (ScopeKey Scope, int PeriodDays, int DataVersion)? _loadedKey;
     private SortColumn _sortColumn = SortColumn.None;
     private bool _sortDescending;
 
@@ -244,7 +244,7 @@
 
     private void OnStateChanged()
     {
-        var currentKey = (State.Scope, State.PeriodDays);
+        var currentKey = (State.Scope, State.PeriodDays, State.DataVersion);
 
         if (_loadedKey is null || !_loadedKey.Value.Equals(currentKey))
         {
@@ -260,7 +260,7 @@
     {
         var scope = State.Scope;
         var periodDays = State.PeriodDays;
-        _loadedKey = (scope, periodDays);
+        _loadedKey = (scope, periodDays, State.DataVersion);
 
         var result = await CheckInService.GetRosterAsync(scope, periodDays, _cts.Token);
 

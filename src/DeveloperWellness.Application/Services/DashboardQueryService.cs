@@ -14,7 +14,9 @@ namespace DeveloperWellness.Application.Services;
 /// and would never hit — with a session-length sliding TTL. Keeps the last snapshot successfully loaded
 /// for a given key visible when a later fetch for that same key fails (FR-011); a rate-limited failure
 /// additionally schedules a reset-aware automatic retry (near GitHub's own reported reset time rather than
-/// a fixed interval) that stops itself and raises <see cref="StateChanged"/> once it succeeds.
+/// a fixed interval). That retry loop keeps rescheduling itself while still rate-limited, and stops and
+/// raises <see cref="StateChanged"/> once it either succeeds or fails with a different, non-rate-limited
+/// kind (so a caller watching only for success would otherwise be left believing a retry is still coming).
 /// </summary>
 /// <remarks>
 /// Registered scoped (one instance per Blazor circuit, matching the retry loop's intended lifetime);
@@ -33,6 +35,13 @@ public sealed class DashboardQueryService(IActivitySource activitySource, IMemor
     /// <summary>Added after a known reset time so many circuits retrying the same key don't all hit GitHub in the same instant.</summary>
     private static readonly TimeSpan RetryJitter = TimeSpan.FromSeconds(15);
 
+    /// <summary>
+    /// Bounds how many consecutive unexpected (non-<see cref="ActivitySourceException"/>) failures
+    /// <see cref="RetryAsync"/> tolerates before giving up on the retry loop entirely (retry-loop
+    /// robustness fix): a bug that keeps throwing on every attempt should not spin the loop forever.
+    /// </summary>
+    private const int MaxConsecutiveUnexpectedRetryFailures = 5;
+
     private readonly IActivitySource _activitySource = activitySource ?? throw new ArgumentNullException(nameof(activitySource));
     private readonly IMemoryCache _cache = cache ?? throw new ArgumentNullException(nameof(cache));
     private readonly WellnessOptions _wellnessOptions = wellnessOptions is null
@@ -44,11 +53,13 @@ public sealed class DashboardQueryService(IActivitySource activitySource, IMemor
 
     private Timer? _retryTimer;
     private (ScopeKey Scope, int PeriodDays)? _retryKey;
+    private int _consecutiveUnexpectedRetryFailures;
     private bool _disposed;
 
     /// <summary>
-    /// Raised after a scheduled retry following a rate-limited failure succeeds; subscribers should
-    /// re-read <see cref="Latest"/> and re-render.
+    /// Raised after a scheduled background retry following a rate-limited failure concludes with either
+    /// a success or a non-rate-limited failure (never for an attempt that is still rate-limited, which
+    /// silently reschedules itself instead); subscribers should re-read <see cref="Latest"/> and re-render.
     /// </summary>
     public event Action? StateChanged;
 
@@ -214,6 +225,7 @@ public sealed class DashboardQueryService(IActivitySource activitySource, IMemor
         return afterJitter > earliestDefault ? afterJitter : earliestDefault;
     }
 
+    /// <summary>Stops the retry loop and resets the unexpected-failure budget, so the next rate-limited episode starts with a clean slate.</summary>
     private void StopRetry()
     {
         lock (_retryGate)
@@ -222,10 +234,20 @@ public sealed class DashboardQueryService(IActivitySource activitySource, IMemor
             _retryTimer?.Dispose();
             _retryTimer = null;
         }
+
+        _consecutiveUnexpectedRetryFailures = 0;
     }
 
     private void OnRetryTick(object? state) => _ = RetryAsync();
 
+    /// <summary>
+    /// Runs one background retry attempt for the pending <see cref="_retryKey"/>, if any (reset-aware
+    /// retry scheduling). Every timer-driven tick reaches here through <see cref="OnRetryTick"/>; the
+    /// retry timer is one-shot (see <see cref="ScheduleRetry"/>'s remarks), so — unlike a repeating
+    /// timer — nothing else keeps this loop going once it stops rescheduling itself, which each branch
+    /// below does explicitly rather than relying on "the timer fires again" (that claim was false once
+    /// the timer became one-shot, and previously left an unexpected failure silently killing the loop).
+    /// </summary>
     private async Task RetryAsync()
     {
         (ScopeKey Scope, int PeriodDays)? key;
@@ -244,20 +266,66 @@ public sealed class DashboardQueryService(IActivitySource activitySource, IMemor
         {
             var cacheKey = BuildCacheKey(retryKey.Scope, retryKey.PeriodDays);
             result = await LoadAsync(retryKey.Scope, retryKey.PeriodDays, cacheKey, CancellationToken.None).ConfigureAwait(false);
+            _consecutiveUnexpectedRetryFailures = 0;
         }
         catch
         {
-            return; // best-effort background retry; the timer fires again on the next tick
+            // LoadAsync itself catches ActivitySourceException and always returns a DashboardResult
+            // rather than throwing, so reaching here means something else went wrong (e.g. a bug in
+            // aggregation or enrichment) — genuinely unexpected, not an ordinary rate-limit failure.
+            // Best-effort: reschedule a fresh one-shot retry after the default delay rather than
+            // letting the loop die silently, but only for a bounded run of consecutive unexpected
+            // failures; past that bound, give up for good rather than spinning forever against a
+            // persistently broken input.
+            _consecutiveUnexpectedRetryFailures++;
+
+            if (_consecutiveUnexpectedRetryFailures > MaxConsecutiveUnexpectedRetryFailures)
+            {
+                StopRetry();
+            }
+            else
+            {
+                ScheduleRetry(retryKey.Scope, retryKey.PeriodDays, retryAfter: null);
+            }
+
+            return;
+        }
+
+        if (result.Kind == DashboardErrorKind.RateLimited)
+        {
+            // Still rate-limited: LoadAsync's own catch clause above already called ScheduleRetry
+            // with this attempt's exception, replacing the timer with a fresh one-shot due time, so
+            // the loop is already correctly continuing itself — nothing more to do. Latest and
+            // StateChanged are deliberately left untouched for this specific outcome: the shell's
+            // rate-limit banner already reads correctly, and firing a notification on every
+            // still-failing tick would be noise without changing what the banner shows.
+            return;
         }
 
         if (result.Kind != DashboardErrorKind.None)
         {
-            return; // still failing; StopRetry() was not called, so the timer keeps ticking
+            // A non-rate-limited failure (credentials missing, or another connectivity problem): by
+            // design, a background timer cannot fix either of those, so the retry loop stops here
+            // rather than continuing to poll. StopRetry() makes that explicit instead of relying on
+            // the fired timer's one-shot semantics to leave the loop silently inert.
+            StopRetry();
         }
 
+        // Reached for both an outright success (Kind == None; LoadAsync's own success path already
+        // called StopRetry()) and the just-stopped non-rate-limited failure above: either way this is
+        // a genuine state change the shell has not seen yet, so subscribers must hear about it — a
+        // failure switching the banner to the new failure kind is exactly as important as a success
+        // clearing it, otherwise the UI could keep promising a retry that will never come.
         Latest = result;
         StateChanged?.Invoke();
     }
+
+    /// <summary>
+    /// Test-only hook that runs one retry attempt directly, bypassing the timer, so unit tests can
+    /// exercise <see cref="RetryAsync"/> deterministically without waiting on real time. Visible via
+    /// <c>InternalsVisibleTo</c>, matching <see cref="ComputeRetryAt"/>.
+    /// </summary>
+    internal Task TriggerRetryForTestAsync() => RetryAsync();
 
     /// <summary>
     /// Applies every landed signal calculator to <paramref name="summaries"/> in one pass:

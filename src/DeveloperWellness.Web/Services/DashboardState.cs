@@ -77,6 +77,14 @@ public sealed class DashboardState
     /// <summary>True while a page-level data fetch is in flight; drives the shell's slim progress bar under the top bar. No page sets this yet — it is a hook for pages to adopt.</summary>
     public bool IsLoading { get; private set; }
 
+    /// <summary>
+    /// Bumped by <see cref="NotifyDataRefreshed"/> whenever data changed underneath the current
+    /// scope/period without the user changing either (e.g. a background rate-limit retry succeeding).
+    /// Pages that gate their refetch on a <c>(Scope, PeriodDays)</c> load key include this in that key so
+    /// a bump alone — with scope and period unchanged — is still recognised as "reload".
+    /// </summary>
+    public int DataVersion { get; private set; }
+
     /// <summary>Changes the selected scope and notifies subscribers.</summary>
     public void SetScope(ScopeKey scope)
     {
@@ -123,6 +131,19 @@ public sealed class DashboardState
     public void RecheckConnection()
     {
         Connection = DetermineConnection();
+        RaiseChanged();
+    }
+
+    /// <summary>
+    /// Bumps <see cref="DataVersion"/> and notifies subscribers. Called after a background refresh (the
+    /// GitHub rate-limit retry succeeding) applies fresh data to this state via <c>DashboardBridge.Apply</c>,
+    /// so every page sharing this circuit's scope and period picks the change up through its own existing
+    /// <see cref="Changed"/> subscription instead of showing kept-last data until the user next changes
+    /// scope, period, or reloads the page.
+    /// </summary>
+    public void NotifyDataRefreshed()
+    {
+        DataVersion++;
         RaiseChanged();
     }
 

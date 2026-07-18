@@ -196,7 +196,7 @@ else
     private readonly CancellationTokenSource _cts = new();
 
     private DashboardResult? _lastResult;
-    private (ScopeKey Scope, int PeriodDays)? _loadedKey;
+    private (ScopeKey Scope, int PeriodDays, int DataVersion)? _loadedKey;
 
     /// <summary>The developer login from the route (e.g. <c>/developer/nova-stardust-demo</c>).</summary>
     [Parameter]
@@ -214,7 +214,7 @@ else
         // The fetched dataset depends only on scope and period, never on the route's Login — navigating
         // between two developers' pages at the same scope/period must not re-fetch (mirrors TeamOverview's
         // _loadedKey guard against refetch loops).
-        var currentKey = (State.Scope, State.PeriodDays);
+        var currentKey = (State.Scope, State.PeriodDays, State.DataVersion);
 
         if (_loadedKey is null || !_loadedKey.Value.Equals(currentKey))
         {
@@ -232,7 +232,7 @@ else
 
     private void OnStateChanged()
     {
-        var currentKey = (State.Scope, State.PeriodDays);
+        var currentKey = (State.Scope, State.PeriodDays, State.DataVersion);
 
         if (_loadedKey is null || !_loadedKey.Value.Equals(currentKey))
         {
@@ -248,7 +248,7 @@ else
     {
         var scope = State.Scope;
         var periodDays = State.PeriodDays;
-        _loadedKey = (scope, periodDays);
+        _loadedKey = (scope, periodDays, State.DataVersion);
 
         var result = await QueryService.GetAsync(scope, periodDays, _cts.Token);
 

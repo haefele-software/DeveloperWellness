@@ -2,6 +2,7 @@
 @inherits LayoutComponentBase
 @implements IDisposable
 @inject DashboardState State
+@inject DashboardQueryService QueryService
 @inject IOptions<WellnessOptions> WellnessOptionsAccessor
 @inject CheckInService CheckInService
 @inject CheckInAlertService AlertService
@@ -210,6 +211,7 @@
     {
         State.Changed += OnShellDataChanged;
         AlertService.Changed += OnShellDataChanged;
+        QueryService.StateChanged += OnQueryServiceStateChanged;
         Navigation.LocationChanged += OnLocationChanged;
         await RefreshAlertStateAsync();
     }
@@ -219,12 +221,41 @@
     {
         State.Changed -= OnShellDataChanged;
         AlertService.Changed -= OnShellDataChanged;
+        QueryService.StateChanged -= OnQueryServiceStateChanged;
         Navigation.LocationChanged -= OnLocationChanged;
         _cts.Cancel();
         _cts.Dispose();
     }
 
     private void OnShellDataChanged() => _ = InvokeAsync(RefreshAlertStateAsync);
+
+    /// <summary>
+    /// Raised off a background timer thread when a rate-limited retry completes (success or failure) —
+    /// never on the renderer's sync context, so the update is marshalled via <see cref="InvokeAsync"/>
+    /// (previously this event had zero subscribers anywhere in the Web project, so a successful retry
+    /// never reached the UI: the rate-limit banner stayed up and pages kept showing kept-last data until
+    /// the user changed scope/period or reloaded). Applies <see cref="DashboardQueryService.Latest"/> to
+    /// the shell regardless of outcome — a failure still needs to reach the banner (e.g. switching from
+    /// "rate limited" to "credentials missing" rather than leaving a stale retry promise showing) — but
+    /// only bumps <see cref="DashboardState.DataVersion"/> on an actual success, since that is the signal
+    /// every page's load-key check uses to justify a cheap cache-hit refetch.
+    /// </summary>
+    private void OnQueryServiceStateChanged() => _ = InvokeAsync(ApplyLatestQueryResult);
+
+    private Task ApplyLatestQueryResult()
+    {
+        if (QueryService.Latest is { } result)
+        {
+            State.Apply(result);
+
+            if (result.Kind == DashboardErrorKind.None)
+            {
+                State.NotifyDataRefreshed();
+            }
+        }
+
+        return Task.CompletedTask;
+    }
 
     private void OnLocationChanged(object? sender, LocationChangedEventArgs e) => _ = InvokeAsync(StateHasChanged);
 
