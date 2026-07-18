@@ -14,7 +14,7 @@ public class DeveloperDetailSmokeTests
     [Fact]
     public async Task Get_DeveloperDetailForSeededOverworkLogin_ReturnsOkWithHeaderHeatmapAndShareBar()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync("/developer/nova-stardust-demo");
@@ -32,7 +32,7 @@ public class DeveloperDetailSmokeTests
     [Fact]
     public async Task Get_DeveloperDetailForUnknownLogin_ReturnsOkWithNotOnRosterState()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync("/developer/not-a-real-login-demo");
@@ -46,7 +46,7 @@ public class DeveloperDetailSmokeTests
     [Fact]
     public async Task Get_TeamOverview_LinksDeveloperNameToTheirDetailPage()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync("/team");

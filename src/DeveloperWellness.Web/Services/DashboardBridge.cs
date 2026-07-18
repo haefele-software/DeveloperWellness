@@ -36,7 +36,7 @@ public static class DashboardBridge
                 state.SetConnection(ConnectionState.CredentialsMissing);
                 break;
             case DashboardErrorKind.RateLimited:
-                state.SetConnection(ConnectionState.RateLimited);
+                state.SetConnection(ConnectionState.RateLimited, result.RetryAt);
                 break;
             case DashboardErrorKind.Unavailable:
             default:

@@ -16,7 +16,7 @@ public class ShellSmokeTests
     [Fact]
     public async Task Get_RootInDemoMode_ReturnsOkWithBrandDemoBannerAndCoverageLine()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync("/");
@@ -31,7 +31,7 @@ public class ShellSmokeTests
     [Fact]
     public void CreatingTheHost_WithAnInvalidWellnessOption_ThrowsOptionsValidationException()
     {
-        using var factory = new WebApplicationFactory<Program>()
+        using var factory = new DemoModeWebApplicationFactory()
             .WithWebHostBuilder(builder => builder.ConfigureAppConfiguration((_, configuration) =>
                 configuration.AddInMemoryCollection(new Dictionary<string, string?>
                 {

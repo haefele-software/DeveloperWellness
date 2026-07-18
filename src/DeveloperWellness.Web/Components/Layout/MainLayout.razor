@@ -162,7 +162,7 @@
                     <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
                     <path d="M12 9v4M12 17h.01" />
                 </svg>
-                <span><strong>GitHub rate limit reached.</strong> Live refresh is paused — you're viewing data loaded at @FreshnessTimeOnly. Everything below stays usable; we'll retry automatically.</span>
+                <span><strong>GitHub rate limit reached.</strong> Live refresh is paused — you're viewing data loaded at @FreshnessTimeOnly. Everything below stays usable; @RetryCopy</span>
             </div>
         }
 
@@ -318,6 +318,11 @@
     private string FreshnessTimeOnly => State.DataLoadedAt is { } loadedAt
         ? loadedAt.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture)
         : "an earlier time";
+
+    /// <summary>The rate-limit banner's closing sentence: a specific reset-aware retry time when known (Fix B), otherwise the generic fallback.</summary>
+    private string RetryCopy => State.RetryAt is { } retryAt
+        ? $"we'll retry automatically around {retryAt.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture)}."
+        : "we'll retry automatically.";
 
     /// <summary>
     /// The persistent coverage line (ui-design.md section 3, FR-007). At organisation scope this is the

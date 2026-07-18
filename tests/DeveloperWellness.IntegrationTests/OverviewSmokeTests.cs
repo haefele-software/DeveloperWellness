@@ -16,7 +16,7 @@ public class OverviewSmokeTests
     [InlineData("/team")]
     public async Task Get_TeamOverviewRoute_ReturnsOkWithSeededRosterAndTeamOverviewContract(string route)
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync(route);
@@ -49,7 +49,7 @@ public class OverviewSmokeTests
     [Fact]
     public async Task Get_TeamOverview_ShowsAmberOutOfHoursShareAndFlagChipForTheSeededOverworkDeveloper()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync("/team");

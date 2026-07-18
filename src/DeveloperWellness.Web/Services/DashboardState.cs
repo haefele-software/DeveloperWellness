@@ -58,6 +58,13 @@ public sealed class DashboardState
     /// <summary>The shell's connectivity state (FR-011).</summary>
     public ConnectionState Connection { get; private set; }
 
+    /// <summary>
+    /// When <see cref="Connection"/> is <see cref="ConnectionState.RateLimited"/>, when the automatic
+    /// background retry is scheduled for (reset-aware retry scheduling); null otherwise, or when no
+    /// specific retry time is known.
+    /// </summary>
+    public DateTimeOffset? RetryAt { get; private set; }
+
     /// <summary>When the currently shown dataset was loaded; null before any data has loaded.</summary>
     public DateTimeOffset? DataLoadedAt { get; private set; }
 
@@ -84,10 +91,15 @@ public sealed class DashboardState
         RaiseChanged();
     }
 
-    /// <summary>Sets the connection state (e.g. after a fetch succeeds or hits a rate limit) and notifies subscribers.</summary>
-    public void SetConnection(ConnectionState connection)
+    /// <summary>
+    /// Sets the connection state (e.g. after a fetch succeeds or hits a rate limit) and notifies
+    /// subscribers. <paramref name="retryAt"/> carries the reset-aware retry time for a rate-limited
+    /// connection; other connection states pass null, clearing any previously shown retry time.
+    /// </summary>
+    public void SetConnection(ConnectionState connection, DateTimeOffset? retryAt = null)
     {
         Connection = connection;
+        RetryAt = retryAt;
         RaiseChanged();
     }
 

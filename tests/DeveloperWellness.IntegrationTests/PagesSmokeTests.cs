@@ -45,7 +45,7 @@ public class PagesSmokeTests
     [Fact]
     public async Task Get_Root_ShowsKpiTilesProjectsTableTeamCardsRecommendationTrendAndSentiment()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync("/");
@@ -96,7 +96,7 @@ public class PagesSmokeTests
     [Fact]
     public async Task Get_CheckIns_ShowsAtLeastTwoEntriesWithDistinctReasonsAndTheFrustrationParagraph()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync("/checkins");
@@ -118,7 +118,7 @@ public class PagesSmokeTests
     [Fact]
     public async Task Get_Quality_ShowsTheSeededRushingRowSteadyRowAndTheBelowSampleNote()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync("/quality");

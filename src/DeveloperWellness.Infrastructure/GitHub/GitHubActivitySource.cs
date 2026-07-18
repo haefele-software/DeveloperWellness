@@ -19,8 +19,51 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
     /// <summary>Page size used for every paged Octokit call; Octokit auto-follows pagination links up to this size per page.</summary>
     private const int PageSize = 100;
 
-    /// <summary>Upper bound on repositories fetched concurrently, kept well under the 5000/hour PAT rate limit (research R2).</summary>
-    private const int MaxConcurrentRepoFetches = 4;
+    /// <summary>
+    /// Upper bound on repositories fetched concurrently. Reduced from 4 to 2 (rate-limit hardening): GitHub's
+    /// secondary rate limiter penalises bursty concurrent REST traffic more heavily than raw request volume,
+    /// so keeping fewer repository fetches in flight at once trades a modestly longer load time for a much
+    /// lower chance of tripping it, on top of staying well under the 5000/hour PAT limit (research R2).
+    /// </summary>
+    private const int MaxConcurrentRepoFetches = 2;
+
+    /// <summary>
+    /// Hard page-count cap on the branch list itself (documented coverage bound, in the spirit of research
+    /// R2's caps): one page of <see cref="PageSize"/> already returns 100 branches, comfortably more than
+    /// the largest configured <c>BranchCap</c> (20 by default), so a second page could only ever contain
+    /// branches beyond the cap this load would keep anyway.
+    /// </summary>
+    private const int BranchListPageCount = 1;
+
+    /// <summary>
+    /// Hard page-count cap on the commit list fetched per branch per load (documented coverage bound,
+    /// research R2): <see cref="PageSize"/> times this is 300 commits, a generous per-branch ceiling for one
+    /// wellness period that stops a single very active branch from unboundedly consuming the request budget.
+    /// </summary>
+    private const int CommitPageCountPerBranch = 3;
+
+    /// <summary>
+    /// Hard page-count cap on issue-comment and PR-review-comment lists fetched per repository per load
+    /// (documented coverage bound, research R2): <see cref="PageSize"/> times this is 300 comments of each
+    /// kind, per repository, per load.
+    /// </summary>
+    private const int CommentPageCount = 3;
+
+    /// <summary>
+    /// Hard page-count cap on the review list fetched per pull request (documented coverage bound): a single
+    /// PR collecting more than <see cref="PageSize"/> reviews within one wellness period is not a realistic
+    /// case worth paying for with unbounded pagination.
+    /// </summary>
+    private const int ReviewPageCountPerPr = 1;
+
+    /// <summary>
+    /// Conservative worst-case request budget checked before a load begins (preflight budget check): a full
+    /// organisation load can issue several hundred requests at the caps above, so treat anything below this
+    /// many remaining core requests as "not enough left to safely start a load" and fail fast with GitHub's
+    /// own reset time instead of burning what little budget remains on a load that would fail partway
+    /// through anyway.
+    /// </summary>
+    private const int MinRemainingRequestBudget = 300;
 
     private readonly object _clientLock = new();
     private Octokit.GitHubClient? _client;
@@ -45,6 +88,19 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
 
         var client = GetOrCreateClient(options.Token);
 
+        // Preflight budget check: fails fast on GitHub's own reset time before spending any of the
+        // remaining budget on a load that would almost certainly run out of requests partway through.
+        // Best effort by design (see TryGetExhaustedBudgetRetryAfterAsync's remarks): a failed preflight
+        // call never blocks a load that might otherwise have succeeded.
+        if (await TryGetExhaustedBudgetRetryAfterAsync(client, cancellationToken).ConfigureAwait(false) is { } exhaustedUntil)
+        {
+            throw new ActivitySourceException(
+                "Pulse has hit GitHub's rate limit. It'll keep showing the data it already has and retry automatically shortly.",
+                innerException: null,
+                ActivitySourceFailureKind.RateLimited,
+                exhaustedUntil);
+        }
+
         try
         {
             return await FetchDatasetAsync(client, options.Organisation, scope, period, wellnessOptions.Value, cancellationToken)
@@ -55,21 +111,29 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
             throw new ActivitySourceException(
                 "Pulse has hit GitHub's rate limit. It'll keep showing the data it already has and retry automatically shortly.",
                 ex,
-                ActivitySourceFailureKind.RateLimited);
+                ActivitySourceFailureKind.RateLimited,
+                ex.Reset);
         }
         catch (Octokit.SecondaryRateLimitExceededException ex)
         {
             throw new ActivitySourceException(
                 "Pulse has hit GitHub's rate limit. It'll keep showing the data it already has and retry automatically shortly.",
                 ex,
-                ActivitySourceFailureKind.RateLimited);
+                ActivitySourceFailureKind.RateLimited,
+                // Octokit 14's SecondaryRateLimitExceededException carries no reset or retry-after value.
+                // GitHub's own secondary-limit guidance is to wait "at least a few minutes", so a fixed
+                // conservative window stands in for a real reset time here.
+                DateTimeOffset.UtcNow.AddMinutes(5));
         }
         catch (Octokit.AbuseException ex)
         {
             throw new ActivitySourceException(
                 "Pulse has hit GitHub's rate limit. It'll keep showing the data it already has and retry automatically shortly.",
                 ex,
-                ActivitySourceFailureKind.RateLimited);
+                ActivitySourceFailureKind.RateLimited,
+                ex.RetryAfterSeconds is { } retryAfterSeconds
+                    ? DateTimeOffset.UtcNow.AddSeconds(retryAfterSeconds)
+                    : DateTimeOffset.UtcNow.AddMinutes(5));
         }
         catch (Octokit.AuthorizationException ex)
         {
@@ -95,6 +159,31 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
             throw new ActivitySourceException(
                 "Pulse couldn't reach GitHub right now. Try again shortly.", ex, ActivitySourceFailureKind.Unavailable);
         }
+    }
+
+    /// <summary>
+    /// Preflight budget check: reads the core REST resource's remaining requests and reset time, returning
+    /// that reset time when remaining is below <see cref="MinRemainingRequestBudget"/> (the load should not
+    /// start), or null when there is enough budget, or when the preflight call itself fails — deliberately
+    /// best effort, since this check exists only to save quota, not to gate a load that might otherwise have
+    /// worked.
+    /// </summary>
+    private static async Task<DateTimeOffset?> TryGetExhaustedBudgetRetryAfterAsync(
+        Octokit.GitHubClient client, CancellationToken cancellationToken)
+    {
+        Octokit.MiscellaneousRateLimit rateLimits;
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            rateLimits = await client.RateLimit.GetRateLimits().ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+
+        var core = rateLimits.Resources.Core;
+        return core.Remaining < MinRemainingRequestBudget ? core.Reset : null;
     }
 
     /// <summary>Returns the cached client, creating it under a lock on first use (thread-safe reuse across calls).</summary>
@@ -330,7 +419,8 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
             await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                return await FetchRepoActivityAsync(client, organisation, repository.Name, period, options, cancellationToken)
+                return await FetchRepoActivityAsync(
+                        client, organisation, repository.Name, repository.DefaultBranch, period, options, cancellationToken)
                     .ConfigureAwait(false);
             }
             finally
@@ -348,6 +438,7 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
         Octokit.GitHubClient client,
         string organisation,
         string repositoryName,
+        string? defaultBranchName,
         Period period,
         WellnessOptions options,
         CancellationToken cancellationToken)
@@ -355,7 +446,7 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
         var events = new List<ActivityEvent>();
 
         events.AddRange(
-            await FetchCommitEventsAsync(client, organisation, repositoryName, period, options.BranchCap, cancellationToken)
+            await FetchCommitEventsAsync(client, organisation, repositoryName, defaultBranchName, period, options.BranchCap, cancellationToken)
                 .ConfigureAwait(false));
 
         var pullRequests = await FetchPullRequestsUpdatedInPeriodAsync(client, organisation, repositoryName, period, cancellationToken)
@@ -374,27 +465,52 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
 
     /// <summary>
     /// Lists up to <paramref name="branchCap"/> branches and every commit on each since
-    /// <paramref name="period"/>'s start, deduplicated by SHA within the repository (FR-002). Octokit's
-    /// branch list carries no update-recency ordering, so the first <paramref name="branchCap"/> branches
-    /// as returned by GitHub stand in for "most recently updated first" — a documented approximation
-    /// (research R2), not a precise recency sort.
+    /// <paramref name="period"/>'s start, deduplicated by SHA within the repository (FR-002). The
+    /// repository's default branch, when known, is moved to the front of the branch list before the cap is
+    /// applied via <see cref="OrderDefaultBranchFirst"/> (rate-limit hardening): it carries the shared
+    /// mainline history every other branch forks from, so fetching it first lets the branch-head skip below
+    /// apply to the largest possible number of feature branches. Beyond the default branch, Octokit's branch
+    /// list carries no update-recency ordering, so the remaining branches, in the order GitHub returns them,
+    /// stand in for "most recently updated first" — a documented approximation (research R2), not a precise
+    /// recency sort.
     /// </summary>
     private static async Task<IReadOnlyList<ActivityEvent>> FetchCommitEventsAsync(
-        Octokit.GitHubClient client, string organisation, string repositoryName, Period period, int branchCap, CancellationToken cancellationToken)
+        Octokit.GitHubClient client,
+        string organisation,
+        string repositoryName,
+        string? defaultBranchName,
+        Period period,
+        int branchCap,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var branches = await client.Repository.Branch.GetAll(organisation, repositoryName, new Octokit.ApiOptions { PageSize = PageSize })
+        var branches = await client.Repository.Branch.GetAll(
+                organisation, repositoryName, new Octokit.ApiOptions { PageSize = PageSize, PageCount = BranchListPageCount })
             .ConfigureAwait(false);
+
+        var orderedBranches = OrderDefaultBranchFirst(branches, defaultBranchName).Take(branchCap);
 
         var events = new List<ActivityEvent>();
         var seenShas = new HashSet<string>(StringComparer.Ordinal);
 
-        foreach (var branch in branches.Take(branchCap))
+        foreach (var branch in orderedBranches)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            // Branch-head skip (rate-limit hardening, documented invariant): a branch's commit history is
+            // an immutable DAG walked backwards from its head. If this head SHA was already collected while
+            // walking an earlier branch (typically the default branch, fetched first per the ordering
+            // above), then everything reachable from this head inside the period window is necessarily a
+            // subset of what that earlier branch's listing already returned — so the per-branch commit-list
+            // call for this branch is skipped outright rather than re-downloading shared ancestry.
+            if (seenShas.Contains(branch.Commit.Sha))
+            {
+                continue;
+            }
+
             var commitRequest = new Octokit.CommitRequest { Since = period.Start, Sha = branch.Name };
             var commits = await client.Repository.Commit.GetAll(
-                    organisation, repositoryName, commitRequest, new Octokit.ApiOptions { PageSize = PageSize })
+                    organisation, repositoryName, commitRequest, new Octokit.ApiOptions { PageSize = PageSize, PageCount = CommitPageCountPerBranch })
                 .ConfigureAwait(false);
 
             foreach (var commit in commits)
@@ -422,6 +538,31 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
         }
 
         return events;
+    }
+
+    /// <summary>
+    /// Moves the repository's default branch to the front of <paramref name="branches"/>, if present,
+    /// leaving every other branch in GitHub's original order (rate-limit hardening): the shared mainline is
+    /// walked first so its commits populate the caller's seen-SHA set before any feature branch is
+    /// considered, maximising how often a feature branch's already-covered head SHA lets its own listing be
+    /// skipped outright. A no-op when <paramref name="defaultBranchName"/> is null/blank or matches no
+    /// fetched branch.
+    /// </summary>
+    internal static IReadOnlyList<Octokit.Branch> OrderDefaultBranchFirst(
+        IReadOnlyList<Octokit.Branch> branches, string? defaultBranchName)
+    {
+        if (string.IsNullOrWhiteSpace(defaultBranchName))
+        {
+            return branches;
+        }
+
+        var defaultBranch = branches.FirstOrDefault(b => string.Equals(b.Name, defaultBranchName, StringComparison.Ordinal));
+        if (defaultBranch is null)
+        {
+            return branches;
+        }
+
+        return [defaultBranch, .. branches.Where(b => !ReferenceEquals(b, defaultBranch))];
     }
 
     /// <summary>
@@ -500,7 +641,7 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
 
             cancellationToken.ThrowIfCancellationRequested();
             var reviews = await client.PullRequest.Review.GetAll(
-                    organisation, repositoryName, pullRequest.Number, new Octokit.ApiOptions { PageSize = PageSize })
+                    organisation, repositoryName, pullRequest.Number, new Octokit.ApiOptions { PageSize = PageSize, PageCount = ReviewPageCountPerPr })
                 .ConfigureAwait(false);
 
             foreach (var review in reviews)
@@ -560,7 +701,7 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
                 organisation,
                 repositoryName,
                 new Octokit.IssueCommentRequest { Since = period.Start },
-                new Octokit.ApiOptions { PageSize = PageSize })
+                new Octokit.ApiOptions { PageSize = PageSize, PageCount = CommentPageCount })
             .ConfigureAwait(false);
 
         foreach (var comment in issueComments)
@@ -578,7 +719,7 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
                 organisation,
                 repositoryName,
                 new Octokit.PullRequestReviewCommentRequest { Since = period.Start },
-                new Octokit.ApiOptions { PageSize = PageSize })
+                new Octokit.ApiOptions { PageSize = PageSize, PageCount = CommentPageCount })
             .ConfigureAwait(false);
 
         foreach (var comment in reviewComments)

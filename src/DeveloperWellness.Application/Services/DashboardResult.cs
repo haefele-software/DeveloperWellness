@@ -25,8 +25,14 @@ public enum DashboardErrorKind
 /// clearing the UI; with no previous snapshot, <see cref="Snapshot"/> is null and the caller renders an
 /// inline error instead.
 /// </summary>
+/// <param name="RetryAt">
+/// When <see cref="Kind"/> is <see cref="DashboardErrorKind.RateLimited"/>, the time the automatic
+/// background retry is scheduled for (reset-aware retry scheduling); null otherwise, or when no reset time
+/// was known and the default retry delay applies.
+/// </param>
 public sealed record DashboardResult(
     DashboardSnapshot? Snapshot,
     string? ErrorMessage,
     DashboardErrorKind Kind,
-    bool IsStale);
+    bool IsStale,
+    DateTimeOffset? RetryAt = null);

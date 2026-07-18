@@ -18,7 +18,7 @@ public class OverviewLandingSmokeTests
     [Fact]
     public async Task Get_Root_ReturnsOkWithOverviewLandingContract()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync("/");
@@ -76,7 +76,7 @@ public class OverviewLandingSmokeTests
     [Fact]
     public async Task Get_Root_ProjectsTableRowsCarryProjectDetailNavigationTarget()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync("/");

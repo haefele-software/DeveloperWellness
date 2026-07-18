@@ -40,11 +40,28 @@ public sealed class ActivitySourceException : Exception
 
     /// <summary>Creates the exception with a user-presentable message, the underlying cause, and its specific failure kind.</summary>
     public ActivitySourceException(string message, Exception? innerException, ActivitySourceFailureKind kind)
+        : this(message, innerException, kind, retryAfter: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates the exception with a user-presentable message, the underlying cause, its specific failure
+    /// kind, and (for a rate-limited failure) when the source expects its budget to recover.
+    /// </summary>
+    public ActivitySourceException(string message, Exception? innerException, ActivitySourceFailureKind kind, DateTimeOffset? retryAfter)
         : base(message, innerException)
     {
         Kind = kind;
+        RetryAfter = retryAfter;
     }
 
     /// <summary>Why this exception was thrown; defaults to <see cref="ActivitySourceFailureKind.Unavailable"/>.</summary>
     public ActivitySourceFailureKind Kind { get; }
+
+    /// <summary>
+    /// When <see cref="Kind"/> is <see cref="ActivitySourceFailureKind.RateLimited"/>, the time the source
+    /// expects its request budget to recover (from GitHub's own reset time where available, otherwise a
+    /// conservative estimate); null when unknown or not applicable to this failure.
+    /// </summary>
+    public DateTimeOffset? RetryAfter { get; }
 }

@@ -13,8 +13,8 @@ namespace DeveloperWellness.Application.Services;
 /// length only — never the full <see cref="Period"/>, whose <see cref="Period.End"/> moves on every call
 /// and would never hit — with a session-length sliding TTL. Keeps the last snapshot successfully loaded
 /// for a given key visible when a later fetch for that same key fails (FR-011); a rate-limited failure
-/// additionally schedules an automatic periodic retry that stops itself and raises
-/// <see cref="StateChanged"/> once it succeeds.
+/// additionally schedules a reset-aware automatic retry (near GitHub's own reported reset time rather than
+/// a fixed interval) that stops itself and raises <see cref="StateChanged"/> once it succeeds.
 /// </summary>
 /// <remarks>
 /// Registered scoped (one instance per Blazor circuit, matching the retry loop's intended lifetime);
@@ -26,7 +26,12 @@ namespace DeveloperWellness.Application.Services;
 public sealed class DashboardQueryService(IActivitySource activitySource, IMemoryCache cache, IOptions<WellnessOptions> wellnessOptions) : IDisposable
 {
     private static readonly TimeSpan CacheSlidingExpiration = TimeSpan.FromMinutes(30);
-    private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(60);
+
+    /// <summary>Retry delay used when a rate-limited failure carried no <see cref="ActivitySourceException.RetryAfter"/> (reset-aware retry scheduling).</summary>
+    private static readonly TimeSpan DefaultRetryDelay = TimeSpan.FromSeconds(60);
+
+    /// <summary>Added after a known reset time so many circuits retrying the same key don't all hit GitHub in the same instant.</summary>
+    private static readonly TimeSpan RetryJitter = TimeSpan.FromSeconds(15);
 
     private readonly IActivitySource _activitySource = activitySource ?? throw new ArgumentNullException(nameof(activitySource));
     private readonly IMemoryCache _cache = cache ?? throw new ArgumentNullException(nameof(cache));
@@ -136,31 +141,77 @@ public sealed class DashboardQueryService(IActivitySource activitySource, IMemor
             var kind = MapErrorKind(ex.Kind);
             var hasPrevious = _lastGoodSnapshots.TryGetValue(key, out var previous);
 
+            DateTimeOffset? retryAt = null;
             if (kind == DashboardErrorKind.RateLimited)
             {
-                ScheduleRetry(scope, periodDays);
+                retryAt = ScheduleRetry(scope, periodDays, ex.RetryAfter);
             }
 
             return new DashboardResult(
                 Snapshot: hasPrevious ? previous : null,
                 ErrorMessage: ex.Message,
                 Kind: kind,
-                IsStale: hasPrevious);
+                IsStale: hasPrevious,
+                RetryAt: retryAt);
         }
     }
 
-    private void ScheduleRetry(ScopeKey scope, int periodDays)
+    /// <summary>
+    /// Schedules (or reschedules, replacing any pending timer for this key) a one-shot background retry at
+    /// <see cref="ComputeRetryAt"/>'s due time, and returns that time. Every rate-limited failure —
+    /// the first one and every subsequent retry attempt that is still rate-limited — calls this afresh with
+    /// its own exception's <see cref="ActivitySourceException.RetryAfter"/>, so the schedule always reflects
+    /// the most recently known reset time rather than a fixed periodic interval.
+    /// </summary>
+    private DateTimeOffset ScheduleRetry(ScopeKey scope, int periodDays, DateTimeOffset? retryAfter)
     {
+        var now = DateTimeOffset.UtcNow;
+        var retryAt = ComputeRetryAt(now, retryAfter);
+
         lock (_retryGate)
         {
             if (_disposed)
             {
-                return;
+                return retryAt;
             }
 
             _retryKey = (scope, periodDays);
-            _retryTimer ??= new Timer(OnRetryTick, state: null, RetryInterval, RetryInterval);
+            _retryTimer?.Dispose();
+
+            var dueTime = retryAt - now;
+            if (dueTime < TimeSpan.Zero)
+            {
+                dueTime = TimeSpan.Zero;
+            }
+
+            // One-shot: Timeout.InfiniteTimeSpan as the period means this timer fires exactly once. A retry
+            // that is still rate-limited reschedules a fresh one-shot timer itself (see the catch clause
+            // above), rather than relying on a fixed-interval repeating timer.
+            _retryTimer = new Timer(OnRetryTick, state: null, dueTime, Timeout.InfiniteTimeSpan);
         }
+
+        return retryAt;
+    }
+
+    /// <summary>
+    /// Computes when the next automatic retry should fire after a rate-limited failure (reset-aware retry
+    /// scheduling). When <paramref name="retryAfter"/> is known (GitHub's own reset time, or a source's
+    /// conservative estimate), retries <see cref="RetryJitter"/> after it, but never sooner than
+    /// <paramref name="now"/> plus <see cref="DefaultRetryDelay"/>, in case a stale or already-past reset
+    /// time was supplied. Falls back to exactly <paramref name="now"/> plus <see cref="DefaultRetryDelay"/>
+    /// when no reset time is known. Extracted as a pure, internally testable helper (no timer, no I/O).
+    /// </summary>
+    internal static DateTimeOffset ComputeRetryAt(DateTimeOffset now, DateTimeOffset? retryAfter)
+    {
+        var earliestDefault = now + DefaultRetryDelay;
+
+        if (retryAfter is not { } reset)
+        {
+            return earliestDefault;
+        }
+
+        var afterJitter = reset + RetryJitter;
+        return afterJitter > earliestDefault ? afterJitter : earliestDefault;
     }
 
     private void StopRetry()

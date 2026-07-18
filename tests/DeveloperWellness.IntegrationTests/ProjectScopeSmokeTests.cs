@@ -30,7 +30,7 @@ public class ProjectScopeSmokeTests
     [Fact]
     public async Task Get_ProjectDetailForSeededProjectWithActivity_ReturnsOkWithStatTilesFlagNoteAndCaption()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync($"/project/{SeededProjectWithActivity}");
@@ -55,7 +55,7 @@ public class ProjectScopeSmokeTests
     [Fact]
     public async Task Get_ProjectDetailForUnknownProjectName_ReturnsOkWithNotCoveredState()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync($"/project/{UnknownProjectName}");
@@ -69,7 +69,7 @@ public class ProjectScopeSmokeTests
     [Fact]
     public async Task Get_TeamOverviewAtOrganisationScope_ShowsTheProjectsColumnHeader()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync("/team");

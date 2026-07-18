@@ -26,7 +26,7 @@ public class CheckInsSmokeTests
     [Fact]
     public async Task Get_CheckIns_ReturnsOkWithCountHeadlineAndSeededFlaggedEntriesInOrder()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync("/checkins");
@@ -91,7 +91,7 @@ public class CheckInsSmokeTests
     [Fact]
     public async Task Get_CheckIns_ShowsEachFlaggedDevelopersTeamName()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync("/checkins");

@@ -152,7 +152,7 @@ public class AiSummaryTests
     [Fact]
     public async Task Get_ProjectDetailForSeededProject_ShowsTheIdleAiSummaryPrompt()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync($"/project/{PulseApiProject}");
@@ -166,7 +166,7 @@ public class AiSummaryTests
     [Fact]
     public async Task Get_DeveloperDetailForSeededLogin_ShowsTheIdleAiSummaryPrompt()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new DemoModeWebApplicationFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync($"/developer/{NovaLogin.Value}");
