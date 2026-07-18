@@ -51,6 +51,17 @@ public sealed class DashboardQueryService(IActivitySource activitySource, IMemor
     private readonly Dictionary<(ScopeKey Scope, int PeriodDays), DashboardSnapshot> _lastGoodSnapshots = [];
     private readonly object _retryGate = new();
 
+    /// <summary>
+    /// Tracks the single in-flight load per cache key (single-flight coalescing, startup-load fix): every
+    /// concurrent caller that misses the cache for the same key joins this one shared task instead of each
+    /// starting its own GitHub fetch — the stampede that made a cold live start take minutes. Guarded by
+    /// <see cref="_inFlightGate"/> rather than <see cref="_retryGate"/>: the two locks protect independent
+    /// state and are never held together, so there is no ordering to get wrong between them. See
+    /// <see cref="GetOrStartCoalescedLoad"/> for the exact join/replace semantics.
+    /// </summary>
+    private readonly Dictionary<string, Task<DashboardResult>> _inFlightLoads = [];
+    private readonly object _inFlightGate = new();
+
     private Timer? _retryTimer;
     private (ScopeKey Scope, int PeriodDays)? _retryKey;
     private int _consecutiveUnexpectedRetryFailures;
@@ -87,14 +98,25 @@ public sealed class DashboardQueryService(IActivitySource activitySource, IMemor
             return hit;
         }
 
-        var result = await LoadAsync(scope, periodDays, cacheKey, cancellationToken).ConfigureAwait(false);
+        // Single-flight coalescing (startup-load fix): join whichever load for this key is already in
+        // flight rather than starting a second one. The shared load itself always runs to completion with
+        // CancellationToken.None (see GetOrStartCoalescedLoad's remarks) — only this caller's own await is
+        // cancellable, via WaitAsync, so cancelling one caller never cancels every other joiner.
+        var sharedLoad = GetOrStartCoalescedLoad(scope, periodDays, cacheKey, forceNew: false);
+        var result = await sharedLoad.WaitAsync(cancellationToken).ConfigureAwait(false);
         Latest = result;
         return result;
     }
 
     /// <summary>
     /// Evicts the cached snapshot for <paramref name="scope"/> and <paramref name="periodDays"/> and
-    /// fetches a fresh one unconditionally (FR-021 explicit refresh).
+    /// fetches a fresh one unconditionally (FR-021 explicit refresh). Always starts a brand-new load rather
+    /// than joining any load already in flight for this key — an explicit refresh means "the caller wants
+    /// the in-flight (possibly stale-scheduled) fetch superseded by a fresh one" — and that new load
+    /// replaces the tracked in-flight entry, so any <see cref="GetAsync"/> caller that misses the cache
+    /// afterwards joins this fresh load rather than a stale one (single-flight coalescing). A caller already
+    /// awaiting an older in-flight load for this key keeps whatever that older load returns; that load
+    /// was already committed to before this refresh started.
     /// </summary>
     /// <exception cref="ArgumentNullException"><paramref name="scope"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="periodDays"/> is not 7, 14, or 30.</exception>
@@ -106,9 +128,28 @@ public sealed class DashboardQueryService(IActivitySource activitySource, IMemor
         var cacheKey = BuildCacheKey(scope, periodDays);
         _cache.Remove(cacheKey);
 
-        var result = await LoadAsync(scope, periodDays, cacheKey, cancellationToken).ConfigureAwait(false);
+        var sharedLoad = GetOrStartCoalescedLoad(scope, periodDays, cacheKey, forceNew: true);
+        var result = await sharedLoad.WaitAsync(cancellationToken).ConfigureAwait(false);
         Latest = result;
         return result;
+    }
+
+    /// <summary>
+    /// True when a cached snapshot for <paramref name="scope"/> and <paramref name="periodDays"/> already
+    /// sits in cache (never mind an in-flight load: this probes the cache, not <see cref="_inFlightLoads"/>).
+    /// Pure cache probe with no side effects — never fetches, never touches <see cref="Latest"/> — so callers
+    /// (the eager-load gate, startup-load fix) can decide whether a page's first load is effectively
+    /// instant before deciding whether it is safe to run during Blazor's static prerender pass.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="scope"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="periodDays"/> is not 7, 14, or 30.</exception>
+    public bool HasCachedSnapshot(ScopeKey scope, int periodDays)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ValidatePeriodDays(periodDays);
+
+        var cacheKey = BuildCacheKey(scope, periodDays);
+        return _cache.TryGetValue(cacheKey, out DashboardSnapshot? cached) && cached is not null;
     }
 
     /// <summary>Stops the pending retry timer, if any.</summary>
@@ -126,6 +167,53 @@ public sealed class DashboardQueryService(IActivitySource activitySource, IMemor
         }
 
         _disposed = true;
+    }
+
+    /// <summary>
+    /// Returns the task already tracked for <paramref name="cacheKey"/> in <see cref="_inFlightLoads"/>
+    /// unless <paramref name="forceNew"/> is true, in which case (or when no load is tracked yet) a new
+    /// coalesced load is started, tracked, and returned (single-flight coalescing, startup-load fix). The
+    /// underlying <see cref="LoadAsync"/> call always runs with <see cref="CancellationToken.None"/> —
+    /// cancelling one joiner must never cancel the fetch every other joiner is also waiting on; each
+    /// caller applies its own cancellation only to its own await, via <c>Task.WaitAsync</c>. The tracked
+    /// entry is removed once the load completes, but only if it is still exactly this same task instance —
+    /// guards a race against <see cref="RefreshAsync"/> replacing the entry with a newer forced load while
+    /// this one is still finishing, which must not clobber that newer entry on its way out.
+    /// </summary>
+    private Task<DashboardResult> GetOrStartCoalescedLoad(ScopeKey scope, int periodDays, string cacheKey, bool forceNew)
+    {
+        lock (_inFlightGate)
+        {
+            if (!forceNew && _inFlightLoads.TryGetValue(cacheKey, out var existing))
+            {
+                return existing;
+            }
+
+            Task<DashboardResult>? self = null;
+            self = RunCoalescedLoadAsync(scope, periodDays, cacheKey, () => self);
+            _inFlightLoads[cacheKey] = self;
+            return self;
+        }
+    }
+
+    /// <summary>Runs one coalesced <see cref="LoadAsync"/> call and untracks it from <see cref="_inFlightLoads"/> on completion (see <see cref="GetOrStartCoalescedLoad"/>).</summary>
+    private async Task<DashboardResult> RunCoalescedLoadAsync(
+        ScopeKey scope, int periodDays, string cacheKey, Func<Task<DashboardResult>?> self)
+    {
+        try
+        {
+            return await LoadAsync(scope, periodDays, cacheKey, CancellationToken.None).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_inFlightGate)
+            {
+                if (_inFlightLoads.TryGetValue(cacheKey, out var current) && ReferenceEquals(current, self()))
+                {
+                    _inFlightLoads.Remove(cacheKey);
+                }
+            }
+        }
     }
 
     private async Task<DashboardResult> LoadAsync(ScopeKey scope, int periodDays, string cacheKey, CancellationToken cancellationToken)
@@ -264,8 +352,14 @@ public sealed class DashboardQueryService(IActivitySource activitySource, IMemor
         DashboardResult result;
         try
         {
+            // Routed through the same single-flight coalescing as GetAsync (rather than calling LoadAsync
+            // directly, as before Fix 1) so a background retry tick that lands at the same moment as a
+            // concurrent GetAsync/RefreshAsync call for this exact key shares one fetch instead of racing
+            // two. forceNew: false — a scheduled retry only ever fires for a key with no cached snapshot
+            // (the prior rate-limited failure never cached one), so joining any load already in flight for
+            // it is always correct; there is nothing stale to force past here the way RefreshAsync must.
             var cacheKey = BuildCacheKey(retryKey.Scope, retryKey.PeriodDays);
-            result = await LoadAsync(retryKey.Scope, retryKey.PeriodDays, cacheKey, CancellationToken.None).ConfigureAwait(false);
+            result = await GetOrStartCoalescedLoad(retryKey.Scope, retryKey.PeriodDays, cacheKey, forceNew: false).ConfigureAwait(false);
             _consecutiveUnexpectedRetryFailures = 0;
         }
         catch

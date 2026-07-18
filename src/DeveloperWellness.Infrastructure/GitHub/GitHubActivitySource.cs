@@ -1,6 +1,7 @@
 using DeveloperWellness.Application.Ports;
 using DeveloperWellness.Domain.Model;
 using DeveloperWellness.Domain.Options;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace DeveloperWellness.Infrastructure.GitHub;
@@ -13,19 +14,32 @@ namespace DeveloperWellness.Infrastructure.GitHub;
 /// are deliberately referenced with their full <c>Octokit.</c> prefix throughout this file rather than
 /// via a blanket <c>using</c>, because <c>Octokit.Team</c> and <c>Octokit.Project</c> would otherwise
 /// collide with the Domain model types of the same name.
+///
+/// Rate-limit hardening: every remote call below runs strictly one at a time (<see cref="MaxConcurrentRepoFetches"/>)
+/// and is paced by a small fixed delay (<see cref="PaceAsync"/>) per GitHub's own guidance for avoiding its
+/// secondary/burst limiter. <see cref="ActivitySourceFailureKind.RateLimited"/> failures carry one of two
+/// distinct user-presentable messages depending on which limiter tripped (<see cref="SelectRateLimitMessage"/>),
+/// and every thrown <see cref="ActivitySourceException"/> is logged once as a warning via the injected
+/// <paramref name="logger"/>.
 /// </summary>
-public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, IOptions<WellnessOptions> wellnessOptions) : IActivitySource
+public sealed class GitHubActivitySource(
+    IOptions<GitHubOptions> gitHubOptions,
+    IOptions<WellnessOptions> wellnessOptions,
+    ILogger<GitHubActivitySource> logger) : IActivitySource
 {
     /// <summary>Page size used for every paged Octokit call; Octokit auto-follows pagination links up to this size per page.</summary>
     private const int PageSize = 100;
 
     /// <summary>
-    /// Upper bound on repositories fetched concurrently. Reduced from 4 to 2 (rate-limit hardening): GitHub's
-    /// secondary rate limiter penalises bursty concurrent REST traffic more heavily than raw request volume,
-    /// so keeping fewer repository fetches in flight at once trades a modestly longer load time for a much
-    /// lower chance of tripping it, on top of staying well under the 5000/hour PAT limit (research R2).
+    /// Upper bound on repositories fetched concurrently. Reduced from 2 to 1 (rate-limit hardening,
+    /// serialization): GitHub's documented guidance for avoiding its secondary/burst limiter is to make
+    /// requests serially with no concurrency at all, not merely with a smaller concurrency window, so
+    /// repository fetches now run strictly one at a time rather than two-at-once, on top of each
+    /// repository's own calls already being paced (see <see cref="PaceAsync"/>). The <see cref="SemaphoreSlim"/>
+    /// gate in <see cref="FetchAllRepoActivityAsync"/> is kept at capacity 1 rather than removed outright,
+    /// so a future relaxation of this constant does not require restructuring the fetch loop.
     /// </summary>
-    private const int MaxConcurrentRepoFetches = 2;
+    private const int MaxConcurrentRepoFetches = 1;
 
     /// <summary>
     /// Hard page-count cap on the branch list itself (documented coverage bound, in the spirit of research
@@ -65,8 +79,61 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
     /// </summary>
     private const int MinRemainingRequestBudget = 300;
 
+    /// <summary>
+    /// Fixed pause awaited before every individual GitHub REST call in the org-level and per-repository
+    /// fetch pipelines below, via <see cref="PaceAsync"/> (rate-limit hardening, pacing): GitHub's
+    /// documented guidance for avoiding its secondary/burst limiter is to pace requests rather than fire
+    /// them back-to-back, on top of running them strictly serially (see <see cref="MaxConcurrentRepoFetches"/>).
+    /// Throughput math at the default caps (10 repositories, 20 branches per repository): a full
+    /// organisation load's worst case is on the order of a few hundred GitHub REST calls in total (branch
+    /// and commit lists, PR pages, reviews, comments, and weekly-participation stats across every covered
+    /// repository, plus the org roster and team membership calls) — roughly 300-400 in practice, ~350 as a
+    /// round figure. At 25ms each (trimmed from 75ms, startup-load fix: still strictly serial and still
+    /// comfortably polite per GitHub's secondary-limit guidance, which asks for pacing and no concurrency,
+    /// not a specific minimum delay), that adds only ~9 seconds of pure pacing delay on top of GitHub's own
+    /// response latency, on a live circuit that now starts this fetch from <c>OnAfterRenderAsync</c> rather
+    /// than blocking Blazor's prerendered response behind it (see <c>EagerLoadGate</c>) — the loading state
+    /// the UI already shows while a load is in flight, not something that blocks the initial page paint.
+    /// </summary>
+    private static readonly TimeSpan InterCallDelay = TimeSpan.FromMilliseconds(25);
+
+    /// <summary>
+    /// The message shown when GitHub's primary hourly request budget is genuinely exhausted (rate-limit
+    /// hardening, message selection): distinct from <see cref="SecondaryRateLimitMessage"/> because the two
+    /// failures have different causes and different user framing, even though both map to
+    /// <see cref="ActivitySourceFailureKind.RateLimited"/> for callers that only care about the kind.
+    /// </summary>
+    private const string PrimaryRateLimitMessage =
+        "Pulse has used up GitHub's hourly request budget. Your data stays visible; it will retry automatically when the budget resets.";
+
+    /// <summary>
+    /// The message shown when GitHub's secondary/burst (abuse) limiter tripped rather than the primary
+    /// hourly budget (rate-limit hardening, message selection): see <see cref="SelectRateLimitMessage"/> for
+    /// how a failure is routed to this message versus <see cref="PrimaryRateLimitMessage"/>.
+    /// </summary>
+    private const string SecondaryRateLimitMessage =
+        "GitHub asked Pulse to slow down (burst limit). Requests now run slower to stay friendly; it will retry automatically shortly.";
+
     private readonly object _clientLock = new();
     private Octokit.GitHubClient? _client;
+
+    /// <summary>
+    /// Mutable request-count accumulator threaded through one <see cref="GetActivityAsync"/> call's fetch
+    /// pipeline (diagnostics): every <see cref="PaceAsync"/> call increments it once per GitHub REST call it
+    /// paces, so the information-level log at the end of a successful load can report an approximate
+    /// request-count estimate at effectively no extra cost. Not thread-safe by design: <see
+    /// cref="MaxConcurrentRepoFetches"/> keeps the whole fetch pipeline strictly serial (one repository, one
+    /// remote call, at a time), so exactly one caller is ever incrementing a given instance at once.
+    /// </summary>
+    private sealed class RequestCounter
+    {
+        public int Count { get; private set; }
+
+        public void Increment() => Count++;
+    }
+
+    /// <summary>The remaining/limit/reset triple read from GitHub's own <c>/rate_limit</c> endpoint by the preflight check.</summary>
+    private readonly record struct RateLimitSnapshot(int Remaining, int Limit, DateTimeOffset Reset);
 
     /// <inheritdoc />
     /// <remarks>
@@ -90,53 +157,86 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
 
         // Preflight budget check: fails fast on GitHub's own reset time before spending any of the
         // remaining budget on a load that would almost certainly run out of requests partway through.
-        // Best effort by design (see TryGetExhaustedBudgetRetryAfterAsync's remarks): a failed preflight
-        // call never blocks a load that might otherwise have succeeded.
-        if (await TryGetExhaustedBudgetRetryAfterAsync(client, cancellationToken).ConfigureAwait(false) is { } exhaustedUntil)
+        // Best effort by design (see TryGetExhaustedBudgetSnapshotAsync's remarks): a failed preflight
+        // call never blocks a load that might otherwise have succeeded. Deliberately not paced: this single
+        // call exists to fail a doomed load fast, and delaying it would only slow down the path it exists
+        // to keep quick.
+        if (await TryGetExhaustedBudgetSnapshotAsync(client, cancellationToken).ConfigureAwait(false) is { } snapshot)
         {
-            throw new ActivitySourceException(
-                "Pulse has hit GitHub's rate limit. It'll keep showing the data it already has and retry automatically shortly.",
-                innerException: null,
+            logger.LogWarning(
+                "GitHub preflight found insufficient primary rate-limit budget before starting a load: {Remaining}/{Limit} requests remaining, resets at {Reset:O}. Kind={Kind}, RetryAfter={RetryAfter:O}.",
+                snapshot.Remaining,
+                snapshot.Limit,
+                snapshot.Reset,
                 ActivitySourceFailureKind.RateLimited,
-                exhaustedUntil);
+                snapshot.Reset);
+
+            throw new ActivitySourceException(
+                PrimaryRateLimitMessage, innerException: null, ActivitySourceFailureKind.RateLimited, snapshot.Reset);
         }
+
+        var requestCounter = new RequestCounter();
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
         try
         {
-            return await FetchDatasetAsync(client, options.Organisation, scope, period, wellnessOptions.Value, cancellationToken)
+            var dataset = await FetchDatasetAsync(
+                    client, options.Organisation, scope, period, wellnessOptions.Value, requestCounter, cancellationToken)
                 .ConfigureAwait(false);
+
+            logger.LogInformation(
+                "GitHub load completed in {ElapsedMilliseconds}ms using approximately {RequestCount} requests.",
+                stopwatch.ElapsedMilliseconds,
+                requestCounter.Count);
+
+            return dataset;
         }
         catch (Octokit.RateLimitExceededException ex)
         {
-            throw new ActivitySourceException(
-                "Pulse has hit GitHub's rate limit. It'll keep showing the data it already has and retry automatically shortly.",
+            logger.LogWarning(
                 ex,
+                "GitHub primary rate limit exceeded mid-load. Kind={Kind}, RetryAfter={RetryAfter:O}.",
                 ActivitySourceFailureKind.RateLimited,
                 ex.Reset);
+
+            throw new ActivitySourceException(
+                SelectRateLimitMessage(isSecondary: false), ex, ActivitySourceFailureKind.RateLimited, ex.Reset);
         }
         catch (Octokit.SecondaryRateLimitExceededException ex)
         {
-            throw new ActivitySourceException(
-                "Pulse has hit GitHub's rate limit. It'll keep showing the data it already has and retry automatically shortly.",
+            // Octokit 14's SecondaryRateLimitExceededException carries no reset or retry-after value.
+            // GitHub's own secondary-limit guidance is to wait "at least a few minutes", so a fixed
+            // conservative window stands in for a real reset time here.
+            var retryAfter = DateTimeOffset.UtcNow.AddMinutes(5);
+
+            logger.LogWarning(
                 ex,
+                "GitHub secondary (burst) rate limit exceeded mid-load. Kind={Kind}, RetryAfter={RetryAfter:O}.",
                 ActivitySourceFailureKind.RateLimited,
-                // Octokit 14's SecondaryRateLimitExceededException carries no reset or retry-after value.
-                // GitHub's own secondary-limit guidance is to wait "at least a few minutes", so a fixed
-                // conservative window stands in for a real reset time here.
-                DateTimeOffset.UtcNow.AddMinutes(5));
+                retryAfter);
+
+            throw new ActivitySourceException(
+                SelectRateLimitMessage(isSecondary: true), ex, ActivitySourceFailureKind.RateLimited, retryAfter);
         }
         catch (Octokit.AbuseException ex)
         {
-            throw new ActivitySourceException(
-                "Pulse has hit GitHub's rate limit. It'll keep showing the data it already has and retry automatically shortly.",
+            var retryAfter = ex.RetryAfterSeconds is { } retryAfterSeconds
+                ? DateTimeOffset.UtcNow.AddSeconds(retryAfterSeconds)
+                : DateTimeOffset.UtcNow.AddMinutes(5);
+
+            logger.LogWarning(
                 ex,
+                "GitHub abuse detection triggered mid-load. Kind={Kind}, RetryAfter={RetryAfter:O}.",
                 ActivitySourceFailureKind.RateLimited,
-                ex.RetryAfterSeconds is { } retryAfterSeconds
-                    ? DateTimeOffset.UtcNow.AddSeconds(retryAfterSeconds)
-                    : DateTimeOffset.UtcNow.AddMinutes(5));
+                retryAfter);
+
+            throw new ActivitySourceException(
+                SelectRateLimitMessage(isSecondary: true), ex, ActivitySourceFailureKind.RateLimited, retryAfter);
         }
         catch (Octokit.AuthorizationException ex)
         {
+            logger.LogWarning(ex, "GitHub rejected Pulse's credentials outright. Kind={Kind}.", ActivitySourceFailureKind.CredentialsMissing);
+
             throw new ActivitySourceException(
                 "GitHub rejected Pulse's credentials. Check GitHub:Token in configuration, then re-check.",
                 ex,
@@ -144,6 +244,28 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
         }
         catch (Octokit.ForbiddenException ex)
         {
+            // Bug fix (rate-limit hardening): Octokit maps some account-level throttles to a bare
+            // ForbiddenException whose message still reads "rate limit exceeded" rather than to one of its
+            // own typed rate-limit exceptions above. Without this check that response fell into this same
+            // catch block's original credentials-missing branch below — the wrong message, since it told
+            // the user to check their token when the real problem was throttling.
+            var kind = ClassifyForbidden(ex.Message);
+            if (kind == ActivitySourceFailureKind.RateLimited)
+            {
+                var retryAfter = DateTimeOffset.UtcNow.AddMinutes(5);
+
+                logger.LogWarning(
+                    ex,
+                    "GitHub returned a forbidden response reclassified as a rate limit by message content. Kind={Kind}, RetryAfter={RetryAfter:O}.",
+                    kind,
+                    retryAfter);
+
+                throw new ActivitySourceException(
+                    SelectRateLimitMessage(isSecondary: true), ex, ActivitySourceFailureKind.RateLimited, retryAfter);
+            }
+
+            logger.LogWarning(ex, "GitHub rejected credentials or a missing permission. Kind={Kind}.", kind);
+
             throw new ActivitySourceException(
                 "GitHub rejected Pulse's credentials, or the token is missing a required permission. Check GitHub:Token, then re-check.",
                 ex,
@@ -151,24 +273,55 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
         }
         catch (Octokit.ApiException ex)
         {
+            logger.LogWarning(ex, "GitHub API call failed. Kind={Kind}.", ActivitySourceFailureKind.Unavailable);
+
             throw new ActivitySourceException(
                 "Pulse couldn't reach GitHub right now. Try again shortly.", ex, ActivitySourceFailureKind.Unavailable);
         }
         catch (HttpRequestException ex)
         {
+            logger.LogWarning(ex, "GitHub request failed at the transport level. Kind={Kind}.", ActivitySourceFailureKind.Unavailable);
+
             throw new ActivitySourceException(
                 "Pulse couldn't reach GitHub right now. Try again shortly.", ex, ActivitySourceFailureKind.Unavailable);
         }
     }
 
     /// <summary>
-    /// Preflight budget check: reads the core REST resource's remaining requests and reset time, returning
-    /// that reset time when remaining is below <see cref="MinRemainingRequestBudget"/> (the load should not
-    /// start), or null when there is enough budget, or when the preflight call itself fails — deliberately
-    /// best effort, since this check exists only to save quota, not to gate a load that might otherwise have
-    /// worked.
+    /// Classifies a <see cref="Octokit.ForbiddenException"/> by message content (rate-limit hardening, bug
+    /// fix). Any mention of "rate limit" maps to <see cref="ActivitySourceFailureKind.RateLimited"/> instead
+    /// of the credentials-missing kind this exception type otherwise carries; everything else (a genuinely
+    /// forbidden token or a missing permission scope) keeps the original behaviour.
     /// </summary>
-    private static async Task<DateTimeOffset?> TryGetExhaustedBudgetRetryAfterAsync(
+    internal static ActivitySourceFailureKind ClassifyForbidden(string message) =>
+        message.Contains("rate limit", StringComparison.OrdinalIgnoreCase)
+            ? ActivitySourceFailureKind.RateLimited
+            : ActivitySourceFailureKind.CredentialsMissing;
+
+    /// <summary>
+    /// Picks which of the two rate-limit messages to surface for a <see cref="ActivitySourceFailureKind.RateLimited"/>
+    /// failure (rate-limit hardening, message selection). The choice is driven by which Octokit exception
+    /// path is running rather than by parsing message text a second time: GitHub only ever lets Octokit
+    /// throw its typed <see cref="Octokit.RateLimitExceededException"/> when the primary hourly budget is
+    /// genuinely exhausted (Octokit parses the matching rate-limit response headers to do so), so every
+    /// other rate-limit path — <see cref="Octokit.SecondaryRateLimitExceededException"/>,
+    /// <see cref="Octokit.AbuseException"/>, and a <see cref="Octokit.ForbiddenException"/> reclassified by
+    /// <see cref="ClassifyForbidden"/> — is, by elimination, the secondary/abuse burst throttle even when
+    /// its own message never uses the word "secondary". That elimination is exactly the live-diagnosed case
+    /// this hardening targets: a 403 "rate limit exceeded" response while GitHub's own <c>/rate_limit</c>
+    /// endpoint still showed thousands of primary requests remaining.
+    /// </summary>
+    internal static string SelectRateLimitMessage(bool isSecondary) =>
+        isSecondary ? SecondaryRateLimitMessage : PrimaryRateLimitMessage;
+
+    /// <summary>
+    /// Preflight budget check: reads the core REST resource's remaining requests, limit, and reset time,
+    /// returning that snapshot when remaining is below <see cref="MinRemainingRequestBudget"/> (the load
+    /// should not start), or null when there is enough budget, or when the preflight call itself fails —
+    /// deliberately best effort, since this check exists only to save quota, not to gate a load that might
+    /// otherwise have worked.
+    /// </summary>
+    private static async Task<RateLimitSnapshot?> TryGetExhaustedBudgetSnapshotAsync(
         Octokit.GitHubClient client, CancellationToken cancellationToken)
     {
         Octokit.MiscellaneousRateLimit rateLimits;
@@ -183,7 +336,9 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
         }
 
         var core = rateLimits.Resources.Core;
-        return core.Remaining < MinRemainingRequestBudget ? core.Reset : null;
+        return core.Remaining < MinRemainingRequestBudget
+            ? new RateLimitSnapshot(core.Remaining, core.Limit, core.Reset)
+            : null;
     }
 
     /// <summary>Returns the cached client, creating it under a lock on first use (thread-safe reuse across calls).</summary>
@@ -203,6 +358,18 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
         }
     }
 
+    /// <summary>
+    /// Awaits <see cref="InterCallDelay"/> and increments <paramref name="counter"/> immediately before the
+    /// caller issues its next GitHub REST call (rate-limit hardening, pacing). Every remote call in the
+    /// org-level and per-repository fetch pipelines below calls this first; the preflight budget check
+    /// deliberately does not (see its own remarks).
+    /// </summary>
+    private static async Task PaceAsync(RequestCounter counter, CancellationToken cancellationToken)
+    {
+        counter.Increment();
+        await Task.Delay(InterCallDelay, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Assembles the full dataset for one scope and period (research R2, data-model.md ActivityDataset).</summary>
     private static async Task<ActivityDataset> FetchDatasetAsync(
         Octokit.GitHubClient client,
@@ -210,24 +377,26 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
         ScopeKey scope,
         Period period,
         WellnessOptions options,
+        RequestCounter counter,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
         var members = await client.Organization.Member.GetAll(organisation, new Octokit.ApiOptions { PageSize = PageSize })
             .ConfigureAwait(false);
         var roster = members.Select(MapDeveloper).ToList();
 
         cancellationToken.ThrowIfCancellationRequested();
-        var teams = await FetchTeamsAsync(client, organisation, cancellationToken).ConfigureAwait(false);
+        var teams = await FetchTeamsAsync(client, organisation, counter, cancellationToken).ConfigureAwait(false);
 
         cancellationToken.ThrowIfCancellationRequested();
-        var repositories = await FetchCoveredRepositoriesAsync(client, organisation, scope, options.RepoCap, cancellationToken)
+        var repositories = await FetchCoveredRepositoriesAsync(client, organisation, scope, options.RepoCap, counter, cancellationToken)
             .ConfigureAwait(false);
         var projects = repositories.Select(MapProject).ToList();
         var coveredProjectNames = projects.Select(p => p.Name).ToList();
 
         cancellationToken.ThrowIfCancellationRequested();
-        var repoResults = await FetchAllRepoActivityAsync(client, organisation, repositories, period, options, cancellationToken)
+        var repoResults = await FetchAllRepoActivityAsync(client, organisation, repositories, period, options, counter, cancellationToken)
             .ConfigureAwait(false);
 
         var events = DeduplicateCommits(repoResults.SelectMany(r => r.Events));
@@ -256,11 +425,12 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
     /// since silently returning zero teams on a throttled request would be misleading.
     /// </summary>
     private static async Task<IReadOnlyList<Team>> FetchTeamsAsync(
-        Octokit.GitHubClient client, string organisation, CancellationToken cancellationToken)
+        Octokit.GitHubClient client, string organisation, RequestCounter counter, CancellationToken cancellationToken)
     {
         IReadOnlyList<Octokit.Team> rawTeams;
         try
         {
+            await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
             rawTeams = await client.Organization.Team.GetAll(organisation, new Octokit.ApiOptions { PageSize = PageSize })
                 .ConfigureAwait(false);
         }
@@ -290,6 +460,7 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
             IReadOnlyList<Octokit.User> members;
             try
             {
+                await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
                 members = await client.Organization.Team.GetAllMembers(rawTeam.Id, new Octokit.ApiOptions { PageSize = PageSize })
                     .ConfigureAwait(false);
             }
@@ -358,13 +529,19 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
     /// scope, fetches every org repository and takes the top <paramref name="repoCap"/> by push recency.
     /// </summary>
     private static async Task<IReadOnlyList<Octokit.Repository>> FetchCoveredRepositoriesAsync(
-        Octokit.GitHubClient client, string organisation, ScopeKey scope, int repoCap, CancellationToken cancellationToken)
+        Octokit.GitHubClient client,
+        string organisation,
+        ScopeKey scope,
+        int repoCap,
+        RequestCounter counter,
+        CancellationToken cancellationToken)
     {
         if (scope.Kind == ScopeKind.Project)
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
+                await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
                 var repository = await client.Repository.Get(organisation, scope.ProjectName!).ConfigureAwait(false);
                 return [repository];
             }
@@ -378,6 +555,7 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+        await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
         var repositories = await client.Repository.GetAllForOrg(organisation, new Octokit.ApiOptions { PageSize = PageSize })
             .ConfigureAwait(false);
 
@@ -403,13 +581,17 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
     /// <summary>The events and weekly participation series fetched for a single repository.</summary>
     private readonly record struct RepoActivityResult(IReadOnlyList<ActivityEvent> Events, IReadOnlyList<int> WeeklyParticipation);
 
-    /// <summary>Fetches every covered repository's activity concurrently, bounded by <see cref="MaxConcurrentRepoFetches"/>.</summary>
+    /// <summary>
+    /// Fetches every covered repository's activity, bounded to <see cref="MaxConcurrentRepoFetches"/>
+    /// repositories in flight at once (rate-limit hardening: currently 1, i.e. strictly serial).
+    /// </summary>
     private static async Task<IReadOnlyList<RepoActivityResult>> FetchAllRepoActivityAsync(
         Octokit.GitHubClient client,
         string organisation,
         IReadOnlyList<Octokit.Repository> repositories,
         Period period,
         WellnessOptions options,
+        RequestCounter counter,
         CancellationToken cancellationToken)
     {
         using var gate = new SemaphoreSlim(MaxConcurrentRepoFetches);
@@ -420,7 +602,7 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
             try
             {
                 return await FetchRepoActivityAsync(
-                        client, organisation, repository.Name, repository.DefaultBranch, period, options, cancellationToken)
+                        client, organisation, repository.Name, repository.DefaultBranch, period, options, counter, cancellationToken)
                     .ConfigureAwait(false);
             }
             finally
@@ -441,23 +623,26 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
         string? defaultBranchName,
         Period period,
         WellnessOptions options,
+        RequestCounter counter,
         CancellationToken cancellationToken)
     {
         var events = new List<ActivityEvent>();
 
         events.AddRange(
-            await FetchCommitEventsAsync(client, organisation, repositoryName, defaultBranchName, period, options.BranchCap, cancellationToken)
+            await FetchCommitEventsAsync(
+                    client, organisation, repositoryName, defaultBranchName, period, options.BranchCap, counter, cancellationToken)
                 .ConfigureAwait(false));
 
-        var pullRequests = await FetchPullRequestsUpdatedInPeriodAsync(client, organisation, repositoryName, period, cancellationToken)
+        var pullRequests = await FetchPullRequestsUpdatedInPeriodAsync(client, organisation, repositoryName, period, counter, cancellationToken)
             .ConfigureAwait(false);
         events.AddRange(
-            await FetchPullRequestEventsAsync(client, organisation, repositoryName, pullRequests, period, cancellationToken)
+            await FetchPullRequestEventsAsync(client, organisation, repositoryName, pullRequests, period, counter, cancellationToken)
                 .ConfigureAwait(false));
 
-        events.AddRange(await FetchCommentEventsAsync(client, organisation, repositoryName, period, cancellationToken).ConfigureAwait(false));
+        events.AddRange(
+            await FetchCommentEventsAsync(client, organisation, repositoryName, period, counter, cancellationToken).ConfigureAwait(false));
 
-        var weeklyParticipation = await FetchWeeklyParticipationAsync(client, organisation, repositoryName, cancellationToken)
+        var weeklyParticipation = await FetchWeeklyParticipationAsync(client, organisation, repositoryName, counter, cancellationToken)
             .ConfigureAwait(false);
 
         return new RepoActivityResult(events, weeklyParticipation);
@@ -481,9 +666,11 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
         string? defaultBranchName,
         Period period,
         int branchCap,
+        RequestCounter counter,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
         var branches = await client.Repository.Branch.GetAll(
                 organisation, repositoryName, new Octokit.ApiOptions { PageSize = PageSize, PageCount = BranchListPageCount })
             .ConfigureAwait(false);
@@ -509,6 +696,7 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
             }
 
             var commitRequest = new Octokit.CommitRequest { Since = period.Start, Sha = branch.Name };
+            await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
             var commits = await client.Repository.Commit.GetAll(
                     organisation, repositoryName, commitRequest, new Octokit.ApiOptions { PageSize = PageSize, PageCount = CommitPageCountPerBranch })
                 .ConfigureAwait(false);
@@ -571,7 +759,12 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
     /// history are not walked in full (research R2).
     /// </summary>
     private static async Task<IReadOnlyList<Octokit.PullRequest>> FetchPullRequestsUpdatedInPeriodAsync(
-        Octokit.GitHubClient client, string organisation, string repositoryName, Period period, CancellationToken cancellationToken)
+        Octokit.GitHubClient client,
+        string organisation,
+        string repositoryName,
+        Period period,
+        RequestCounter counter,
+        CancellationToken cancellationToken)
     {
         var request = new Octokit.PullRequestRequest
         {
@@ -587,6 +780,7 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
         {
             cancellationToken.ThrowIfCancellationRequested();
             var pageOptions = new Octokit.ApiOptions { PageSize = PageSize, StartPage = page, PageCount = 1 };
+            await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
             var batch = await client.PullRequest.GetAllForRepository(organisation, repositoryName, request, pageOptions)
                 .ConfigureAwait(false);
 
@@ -628,6 +822,7 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
         string repositoryName,
         IReadOnlyList<Octokit.PullRequest> pullRequests,
         Period period,
+        RequestCounter counter,
         CancellationToken cancellationToken)
     {
         var events = new List<ActivityEvent>();
@@ -640,6 +835,7 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
             }
 
             cancellationToken.ThrowIfCancellationRequested();
+            await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
             var reviews = await client.PullRequest.Review.GetAll(
                     organisation, repositoryName, pullRequest.Number, new Octokit.ApiOptions { PageSize = PageSize, PageCount = ReviewPageCountPerPr })
                 .ConfigureAwait(false);
@@ -692,11 +888,17 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
     /// not <c>created_at</c> — an old comment edited recently would otherwise be miscounted as new activity.
     /// </summary>
     private static async Task<IReadOnlyList<ActivityEvent>> FetchCommentEventsAsync(
-        Octokit.GitHubClient client, string organisation, string repositoryName, Period period, CancellationToken cancellationToken)
+        Octokit.GitHubClient client,
+        string organisation,
+        string repositoryName,
+        Period period,
+        RequestCounter counter,
+        CancellationToken cancellationToken)
     {
         var events = new List<ActivityEvent>();
 
         cancellationToken.ThrowIfCancellationRequested();
+        await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
         var issueComments = await client.Issue.Comment.GetAllForRepository(
                 organisation,
                 repositoryName,
@@ -715,6 +917,7 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+        await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
         var reviewComments = await client.PullRequest.ReviewComment.GetAllForRepository(
                 organisation,
                 repositoryName,
@@ -741,11 +944,12 @@ public sealed class GitHubActivitySource(IOptions<GitHubOptions> gitHubOptions, 
     /// is skipped rather than failing the whole load. Rate-limit failures still propagate.
     /// </summary>
     private static async Task<IReadOnlyList<int>> FetchWeeklyParticipationAsync(
-        Octokit.GitHubClient client, string organisation, string repositoryName, CancellationToken cancellationToken)
+        Octokit.GitHubClient client, string organisation, string repositoryName, RequestCounter counter, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         try
         {
+            await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
             var participation = await client.Repository.Statistics.GetParticipation(organisation, repositoryName, cancellationToken)
                 .ConfigureAwait(false);
             return participation?.All ?? [];

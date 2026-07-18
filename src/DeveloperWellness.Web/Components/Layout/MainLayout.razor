@@ -205,6 +205,8 @@
 
     private int _unseen;
     private int _needsCheckInCount;
+    private bool _initialLoadStarted;
+    private bool _alertRefreshInFlight;
 
     /// <inheritdoc />
     protected override async Task OnInitializedAsync()
@@ -213,7 +215,26 @@
         AlertService.Changed += OnShellDataChanged;
         QueryService.StateChanged += OnQueryServiceStateChanged;
         Navigation.LocationChanged += OnLocationChanged;
-        await RefreshAlertStateAsync();
+
+        // Startup-load fix: this shell wraps every page, so an ungated call here was the other half of
+        // the indefinite-load bug alongside each page's own load — blocking the very first prerendered
+        // response behind a live roster fetch. Same gate as the pages themselves: eager only when it is
+        // effectively instant (demo mode or a warm cache), otherwise deferred to OnAfterRenderAsync.
+        if (EagerLoadGate.ShouldLoadEagerly(QueryService, State.Scope, State.PeriodDays, WellnessOptionsAccessor.Value.DemoMode))
+        {
+            _initialLoadStarted = true;
+            await RefreshAlertStateAsync();
+        }
+    }
+
+    /// <inheritdoc />
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_initialLoadStarted)
+        {
+            _initialLoadStarted = true;
+            await RefreshAlertStateAsync();
+        }
     }
 
     /// <inheritdoc />
@@ -268,30 +289,55 @@
     /// this method cannot itself trigger another <see cref="DashboardState.Changed"/> or
     /// <see cref="CheckInAlertService.Changed"/> notification.
     /// </summary>
+    /// <remarks>
+    /// Guarded by <see cref="_alertRefreshInFlight"/> (startup-load fix): <see cref="OnShellDataChanged"/>
+    /// fires on every <see cref="DashboardState.Changed"/> notification, including the several a single
+    /// page load raises via <see cref="DashboardState.SetLoading"/> alone (true, then false) — an ungated
+    /// re-entrant call here stampeded a second (and third, ...) roster fetch on top of whatever a page was
+    /// already loading. Skipping re-entry rather than queuing is deliberately simple and still correct:
+    /// the call that is already running captured <see cref="DashboardState.Scope"/>/
+    /// <see cref="DashboardState.PeriodDays"/> at its own start, which — because <see cref="OnShellDataChanged"/>
+    /// defers via <see cref="ComponentBase.InvokeAsync(Action)"/> rather than reading them synchronously off
+    /// the triggering event — already reflects any scope/period change that happened before it started,
+    /// so a skipped re-entrant call is never the last chance to pick up a change.
+    /// </remarks>
     private async Task RefreshAlertStateAsync()
     {
-        var scope = State.Scope;
-        var periodDays = State.PeriodDays;
-
-        var roster = await CheckInService.GetRosterAsync(scope, periodDays, _cts.Token);
-
-        if (roster.Composition is { } composition)
+        if (_alertRefreshInFlight)
         {
-            var flaggedLogins = composition.Roster
-                .Where(status => status.NeedsCheckIn)
-                .Select(status => status.Developer.Login)
-                .ToList();
-
-            _needsCheckInCount = composition.NeedsCheckInCount;
-            _unseen = AlertService.UnseenCount(scope, periodDays, flaggedLogins);
-        }
-        else
-        {
-            _needsCheckInCount = 0;
-            _unseen = 0;
+            return;
         }
 
-        StateHasChanged();
+        _alertRefreshInFlight = true;
+        try
+        {
+            var scope = State.Scope;
+            var periodDays = State.PeriodDays;
+
+            var roster = await CheckInService.GetRosterAsync(scope, periodDays, _cts.Token);
+
+            if (roster.Composition is { } composition)
+            {
+                var flaggedLogins = composition.Roster
+                    .Where(status => status.NeedsCheckIn)
+                    .Select(status => status.Developer.Login)
+                    .ToList();
+
+                _needsCheckInCount = composition.NeedsCheckInCount;
+                _unseen = AlertService.UnseenCount(scope, periodDays, flaggedLogins);
+            }
+            else
+            {
+                _needsCheckInCount = 0;
+                _unseen = 0;
+            }
+
+            StateHasChanged();
+        }
+        finally
+        {
+            _alertRefreshInFlight = false;
+        }
     }
 
     /// <summary>Derives the top bar's page title from the current route (contracts/ui-design.md shell).</summary>

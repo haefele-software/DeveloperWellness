@@ -3,6 +3,7 @@
 @implements IDisposable
 @inject DashboardState State
 @inject DashboardQueryService QueryService
+@inject IOptions<WellnessOptions> WellnessOptionsAccessor
 
 <PageTitle>Pulse — @Name</PageTitle>
 
@@ -123,6 +124,7 @@ else
 
     private DashboardResult? _lastResult;
     private (string Name, int PeriodDays, int DataVersion)? _loadedKey;
+    private bool _initialLoadStarted;
 
     /// <summary>The project name from the route (e.g. <c>/project/pulse-api-demo</c>).</summary>
     [Parameter]
@@ -146,6 +148,23 @@ else
 
         if (_loadedKey is null || !_loadedKey.Value.Equals(currentKey))
         {
+            // Startup-load fix: see DeveloperDetail.razor's OnParametersSetAsync for the full rationale —
+            // the gate only ever applies to this instance's very first load; every later key change (once
+            // _initialLoadStarted is true) loads immediately since we are then definitely past prerendering.
+            if (_initialLoadStarted || EagerLoadGate.ShouldLoadEagerly(QueryService, ScopeKey.Project(Name), State.PeriodDays, WellnessOptionsAccessor.Value.DemoMode))
+            {
+                _initialLoadStarted = true;
+                await LoadAsync();
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_initialLoadStarted)
+        {
+            _initialLoadStarted = true;
             await LoadAsync();
         }
     }
@@ -177,8 +196,18 @@ else
         var name = Name;
         var periodDays = State.PeriodDays;
         _loadedKey = (name, periodDays, State.DataVersion);
+        _lastResult = null;
+        State.SetLoading(true);
 
-        var result = await QueryService.GetAsync(ScopeKey.Project(name), periodDays, _cts.Token);
+        DashboardResult result;
+        try
+        {
+            result = await QueryService.GetAsync(ScopeKey.Project(name), periodDays, _cts.Token);
+        }
+        finally
+        {
+            State.SetLoading(false);
+        }
 
         _lastResult = result;
         State.Apply(result);
@@ -187,7 +216,21 @@ else
 
     private async Task OnRetryClicked()
     {
-        var result = await QueryService.RefreshAsync(ScopeKey.Project(Name), State.PeriodDays, _cts.Token);
+        var name = Name;
+        var periodDays = State.PeriodDays;
+        _loadedKey = (name, periodDays, State.DataVersion);
+        _lastResult = null;
+        State.SetLoading(true);
+
+        DashboardResult result;
+        try
+        {
+            result = await QueryService.RefreshAsync(ScopeKey.Project(name), periodDays, _cts.Token);
+        }
+        finally
+        {
+            State.SetLoading(false);
+        }
 
         _lastResult = result;
         State.Apply(result);

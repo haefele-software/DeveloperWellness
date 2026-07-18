@@ -197,6 +197,7 @@ else
 
     private DashboardResult? _lastResult;
     private (ScopeKey Scope, int PeriodDays, int DataVersion)? _loadedKey;
+    private bool _initialLoadStarted;
 
     /// <summary>The developer login from the route (e.g. <c>/developer/nova-stardust-demo</c>).</summary>
     [Parameter]
@@ -218,6 +219,24 @@ else
 
         if (_loadedKey is null || !_loadedKey.Value.Equals(currentKey))
         {
+            // Startup-load fix: _initialLoadStarted being already true means this instance's first load
+            // already happened (eagerly or via the deferred OnAfterRenderAsync path below), so we are
+            // definitely past prerendering by now and every further key change loads immediately — the
+            // gate below only ever applies to this instance's very first load.
+            if (_initialLoadStarted || EagerLoadGate.ShouldLoadEagerly(QueryService, State.Scope, State.PeriodDays, WellnessOptionsAccessor.Value.DemoMode))
+            {
+                _initialLoadStarted = true;
+                await LoadAsync();
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_initialLoadStarted)
+        {
+            _initialLoadStarted = true;
             await LoadAsync();
         }
     }
@@ -249,8 +268,18 @@ else
         var scope = State.Scope;
         var periodDays = State.PeriodDays;
         _loadedKey = (scope, periodDays, State.DataVersion);
+        _lastResult = null;
+        State.SetLoading(true);
 
-        var result = await QueryService.GetAsync(scope, periodDays, _cts.Token);
+        DashboardResult result;
+        try
+        {
+            result = await QueryService.GetAsync(scope, periodDays, _cts.Token);
+        }
+        finally
+        {
+            State.SetLoading(false);
+        }
 
         _lastResult = result;
         State.Apply(result);
@@ -259,7 +288,21 @@ else
 
     private async Task OnRetryClicked()
     {
-        var result = await QueryService.RefreshAsync(State.Scope, State.PeriodDays, _cts.Token);
+        var scope = State.Scope;
+        var periodDays = State.PeriodDays;
+        _loadedKey = (scope, periodDays, State.DataVersion);
+        _lastResult = null;
+        State.SetLoading(true);
+
+        DashboardResult result;
+        try
+        {
+            result = await QueryService.RefreshAsync(scope, periodDays, _cts.Token);
+        }
+        finally
+        {
+            State.SetLoading(false);
+        }
 
         _lastResult = result;
         State.Apply(result);

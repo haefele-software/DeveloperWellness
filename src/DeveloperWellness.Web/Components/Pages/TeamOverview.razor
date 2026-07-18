@@ -3,6 +3,7 @@
 @implements IDisposable
 @inject DashboardState State
 @inject CheckInService CheckInService
+@inject DashboardQueryService QueryService
 @inject IOptions<WellnessOptions> WellnessOptionsAccessor
 
 <PageTitle>Pulse — Team overview</PageTitle>
@@ -226,12 +227,31 @@
     private (ScopeKey Scope, int PeriodDays, int DataVersion)? _loadedKey;
     private SortColumn _sortColumn = SortColumn.None;
     private bool _sortDescending;
+    private bool _initialLoadStarted;
 
     /// <inheritdoc />
     protected override async Task OnInitializedAsync()
     {
         State.Changed += OnStateChanged;
-        await LoadAsync();
+
+        // Startup-load fix: see Overview.razor's OnInitializedAsync for the full rationale — load here
+        // only when it is effectively instant (demo mode or a warm cache), otherwise defer to
+        // OnAfterRenderAsync so a cold live fetch never blocks the prerendered response.
+        if (EagerLoadGate.ShouldLoadEagerly(QueryService, State.Scope, State.PeriodDays, WellnessOptionsAccessor.Value.DemoMode))
+        {
+            _initialLoadStarted = true;
+            await LoadAsync();
+        }
+    }
+
+    /// <inheritdoc />
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_initialLoadStarted)
+        {
+            _initialLoadStarted = true;
+            await LoadAsync();
+        }
     }
 
     /// <inheritdoc />
@@ -261,8 +281,18 @@
         var scope = State.Scope;
         var periodDays = State.PeriodDays;
         _loadedKey = (scope, periodDays, State.DataVersion);
+        _lastResult = null;
+        State.SetLoading(true);
 
-        var result = await CheckInService.GetRosterAsync(scope, periodDays, _cts.Token);
+        CheckInRosterResult result;
+        try
+        {
+            result = await CheckInService.GetRosterAsync(scope, periodDays, _cts.Token);
+        }
+        finally
+        {
+            State.SetLoading(false);
+        }
 
         _lastResult = result;
         State.Apply(result.Source);
@@ -271,7 +301,21 @@
 
     private async Task OnRetryClicked()
     {
-        var result = await CheckInService.RefreshRosterAsync(State.Scope, State.PeriodDays, _cts.Token);
+        var scope = State.Scope;
+        var periodDays = State.PeriodDays;
+        _loadedKey = (scope, periodDays, State.DataVersion);
+        _lastResult = null;
+        State.SetLoading(true);
+
+        CheckInRosterResult result;
+        try
+        {
+            result = await CheckInService.RefreshRosterAsync(scope, periodDays, _cts.Token);
+        }
+        finally
+        {
+            State.SetLoading(false);
+        }
 
         _lastResult = result;
         State.Apply(result.Source);

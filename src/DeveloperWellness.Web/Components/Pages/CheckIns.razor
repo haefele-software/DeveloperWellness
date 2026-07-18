@@ -4,6 +4,8 @@
 @inject DashboardState State
 @inject CheckInService CheckInService
 @inject CheckInAlertService AlertService
+@inject DashboardQueryService QueryService
+@inject IOptions<WellnessOptions> WellnessOptionsAccessor
 
 <PageTitle>Pulse — Check-in roster</PageTitle>
 
@@ -119,12 +121,31 @@ else
 
     private CheckInRosterResult? _lastRoster;
     private (ScopeKey Scope, int PeriodDays, int DataVersion)? _loadedKey;
+    private bool _initialLoadStarted;
 
     /// <inheritdoc />
     protected override async Task OnInitializedAsync()
     {
         State.Changed += OnStateChanged;
-        await LoadAsync();
+
+        // Startup-load fix: see Overview.razor's OnInitializedAsync for the full rationale — load here
+        // only when it is effectively instant (demo mode or a warm cache), otherwise defer to
+        // OnAfterRenderAsync so a cold live fetch never blocks the prerendered response.
+        if (EagerLoadGate.ShouldLoadEagerly(QueryService, State.Scope, State.PeriodDays, WellnessOptionsAccessor.Value.DemoMode))
+        {
+            _initialLoadStarted = true;
+            await LoadAsync();
+        }
+    }
+
+    /// <inheritdoc />
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_initialLoadStarted)
+        {
+            _initialLoadStarted = true;
+            await LoadAsync();
+        }
     }
 
     /// <inheritdoc />
@@ -154,8 +175,19 @@ else
         var scope = State.Scope;
         var periodDays = State.PeriodDays;
         _loadedKey = (scope, periodDays, State.DataVersion);
+        _lastRoster = null;
+        State.SetLoading(true);
 
-        var result = await CheckInService.GetRosterAsync(scope, periodDays, _cts.Token);
+        CheckInRosterResult result;
+        try
+        {
+            result = await CheckInService.GetRosterAsync(scope, periodDays, _cts.Token);
+        }
+        finally
+        {
+            State.SetLoading(false);
+        }
+
         ApplyResult(scope, periodDays, result);
     }
 
@@ -163,8 +195,20 @@ else
     {
         var scope = State.Scope;
         var periodDays = State.PeriodDays;
+        _loadedKey = (scope, periodDays, State.DataVersion);
+        _lastRoster = null;
+        State.SetLoading(true);
 
-        var result = await CheckInService.RefreshRosterAsync(scope, periodDays, _cts.Token);
+        CheckInRosterResult result;
+        try
+        {
+            result = await CheckInService.RefreshRosterAsync(scope, periodDays, _cts.Token);
+        }
+        finally
+        {
+            State.SetLoading(false);
+        }
+
         ApplyResult(scope, periodDays, result);
     }
 

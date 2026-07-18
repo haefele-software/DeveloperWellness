@@ -3,6 +3,7 @@
 @implements IDisposable
 @inject DashboardState State
 @inject QualityQuantityService QualityQuantityService
+@inject DashboardQueryService QueryService
 @inject IOptions<WellnessOptions> WellnessOptionsAccessor
 
 <PageTitle>Pulse — Quality vs quantity</PageTitle>
@@ -141,12 +142,31 @@
 
     private QualityQuantityResult? _lastResult;
     private (ScopeKey Scope, int PeriodDays, int DataVersion)? _loadedKey;
+    private bool _initialLoadStarted;
 
     /// <inheritdoc />
     protected override async Task OnInitializedAsync()
     {
         State.Changed += OnStateChanged;
-        await LoadAsync();
+
+        // Startup-load fix: see Overview.razor's OnInitializedAsync for the full rationale — load here
+        // only when it is effectively instant (demo mode or a warm cache), otherwise defer to
+        // OnAfterRenderAsync so a cold live fetch never blocks the prerendered response.
+        if (EagerLoadGate.ShouldLoadEagerly(QueryService, State.Scope, State.PeriodDays, WellnessOptionsAccessor.Value.DemoMode))
+        {
+            _initialLoadStarted = true;
+            await LoadAsync();
+        }
+    }
+
+    /// <inheritdoc />
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_initialLoadStarted)
+        {
+            _initialLoadStarted = true;
+            await LoadAsync();
+        }
     }
 
     /// <inheritdoc />
@@ -176,8 +196,18 @@
         var scope = State.Scope;
         var periodDays = State.PeriodDays;
         _loadedKey = (scope, periodDays, State.DataVersion);
+        _lastResult = null;
+        State.SetLoading(true);
 
-        var result = await QualityQuantityService.GetAsync(scope, periodDays, _cts.Token);
+        QualityQuantityResult result;
+        try
+        {
+            result = await QualityQuantityService.GetAsync(scope, periodDays, _cts.Token);
+        }
+        finally
+        {
+            State.SetLoading(false);
+        }
 
         _lastResult = result;
         State.Apply(result.Source);
