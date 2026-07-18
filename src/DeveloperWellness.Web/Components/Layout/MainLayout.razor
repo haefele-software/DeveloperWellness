@@ -1,0 +1,346 @@
+@using System.Globalization
+@inherits LayoutComponentBase
+@implements IDisposable
+@inject DashboardState State
+@inject IOptions<WellnessOptions> WellnessOptionsAccessor
+@inject CheckInService CheckInService
+@inject CheckInAlertService AlertService
+@inject NavigationManager Navigation
+
+<div class="app-shell">
+    <aside class="app-sidebar">
+        <div class="app-brand" aria-label="Pulse — Developer wellness">
+            <span class="app-brand__mark" aria-hidden="true">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2" />
+                </svg>
+            </span>
+            <div>
+                <div class="app-brand__name">Pulse</div>
+                <div class="app-brand__tagline">Developer wellness</div>
+            </div>
+            <span class="visually-hidden">Pulse — Developer wellness</span>
+        </div>
+
+        <nav class="app-nav" aria-label="Primary">
+            <NavLink href="/" Match="NavLinkMatch.All" class="app-nav__item" ActiveClass="app-nav__item--active">
+                <span class="app-nav__bar" aria-hidden="true"></span>
+                <svg class="app-nav__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect width="7" height="9" x="3" y="3" rx="1" />
+                    <rect width="7" height="5" x="14" y="3" rx="1" />
+                    <rect width="7" height="9" x="14" y="12" rx="1" />
+                    <rect width="7" height="5" x="3" y="16" rx="1" />
+                </svg>
+                <span>Overview</span>
+            </NavLink>
+            <NavLink href="/team" class="app-nav__item" ActiveClass="app-nav__item--active">
+                <span class="app-nav__bar" aria-hidden="true"></span>
+                <svg class="app-nav__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+                    <circle cx="9" cy="7" r="4" />
+                </svg>
+                <span>Team overview</span>
+            </NavLink>
+            <NavLink href="/checkins" class="app-nav__item" ActiveClass="app-nav__item--active">
+                <span class="app-nav__bar" aria-hidden="true"></span>
+                <svg class="app-nav__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M19 14c1.5-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z" />
+                </svg>
+                <span>Check-in roster</span>
+                @if (_needsCheckInCount > 0)
+                {
+                    <span class="app-nav__count">@_needsCheckInCount</span>
+                }
+            </NavLink>
+            <NavLink href="/quality" class="app-nav__item" ActiveClass="app-nav__item--active">
+                <span class="app-nav__bar" aria-hidden="true"></span>
+                <svg class="app-nav__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 3v18M7 21h10M12 5 5 8l2 5a3.5 3.5 0 0 1-4 0l2-5M12 5l7 3-2 5a3.5 3.5 0 0 0 4 0l-2-5" />
+                </svg>
+                <span>Quality vs quantity</span>
+            </NavLink>
+            @if (State.Scope.Kind == ScopeKind.Project)
+            {
+                <NavLink href="@($"/project/{State.Scope.ProjectName}")" class="app-nav__item" ActiveClass="app-nav__item--active">
+                    <span class="app-nav__bar" aria-hidden="true"></span>
+                    <svg class="app-nav__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+                    </svg>
+                    <span>Project detail</span>
+                </NavLink>
+            }
+        </nav>
+
+        <div class="app-sidebar__footer">
+            <div class="status-card">
+                <span class="status-card__row">
+                    <span class="status-card__dot status-card__dot--@ConnectionModifier" aria-hidden="true"></span>
+                    <span role="status">@ConnectionText</span>
+                </span>
+                <span>Blazor Server · .NET @Environment.Version</span>
+                <span class="status-card__meta">@FreshnessText</span>
+            </div>
+            <div class="persona">
+                <span class="persona__avatar" aria-hidden="true">TL</span>
+                <div class="persona__text">
+                    <span class="persona__name">Team Lead</span>
+                    <span class="persona__role">Engineering</span>
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <main class="app-main">
+        <div class="app-topbar">
+            <span class="app-topbar__title">@PageTitle</span>
+            @if (State.IsDemoData)
+            {
+                <span class="demo-pill">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+                        <circle cx="12" cy="12" r="9" />
+                        <path d="M12 8v4M12 16h.01" />
+                    </svg>
+                    Demo data — fictitious identities
+                </span>
+            }
+            <div class="app-topbar__right">
+                @if (_unseen > 0)
+                {
+                    <button type="button" class="alert-pill" @onclick="OnAlertPillClicked">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M19 14c1.5-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z" />
+                        </svg>
+                        <span>@CheckInCopy.AlertText(_unseen)</span>
+                    </button>
+                }
+                <label class="scope-control">
+                    Scope
+                    <select class="scope-control__select" value="@ScopeSelectValue" @onchange="OnScopeChanged">
+                        <option value="@OrganisationOptionValue">Organisation</option>
+                        @foreach (var project in State.CoveredProjectNames)
+                        {
+                            <option value="@project">@project</option>
+                        }
+                    </select>
+                </label>
+                <div class="period-control" role="radiogroup" aria-label="Period">
+                    @foreach (var days in PeriodOptions)
+                    {
+                        <button type="button"
+                                class="period-control__button @(State.PeriodDays == days ? "period-control__button--active" : string.Empty)"
+                                role="radio"
+                                aria-checked="@(State.PeriodDays == days ? "true" : "false")"
+                                @onclick="() => State.SetPeriod(days)">
+                            @($"{days} days")
+                        </button>
+                    }
+                </div>
+            </div>
+        </div>
+
+        <div class="app-loading">
+            @if (State.IsLoading)
+            {
+                <div class="app-loading__track">
+                    <div class="app-loading__bar"></div>
+                </div>
+            }
+        </div>
+
+        <div class="coverage-strip">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="2" stroke-linecap="round">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7v5l3 2" />
+            </svg>
+            <span>@CoverageLine</span>
+        </div>
+
+        @if (State.Connection == ConnectionState.RateLimited)
+        {
+            <div class="rate-limit-banner" role="alert">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                    <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+                    <path d="M12 9v4M12 17h.01" />
+                </svg>
+                <span><strong>GitHub rate limit reached.</strong> Live refresh is paused — you're viewing data loaded at @FreshnessTimeOnly. Everything below stays usable; we'll retry automatically.</span>
+            </div>
+        }
+
+        @if (State.Connection == ConnectionState.CredentialsMissing)
+        {
+            <div class="credentials-screen">
+                <div class="credentials-card">
+                    <div class="credentials-card__icon" aria-hidden="true">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 1C5.9 1 1 5.9 1 12c0 4.9 3.1 9 7.5 10.4.5.1.7-.2.7-.5v-1.9c-3 .7-3.7-1.3-3.7-1.3-.5-1.3-1.2-1.6-1.2-1.6-1-.7.1-.7.1-.7 1.1.1 1.7 1.1 1.7 1.1 1 1.7 2.6 1.2 3.2.9.1-.7.4-1.2.7-1.5-2.4-.3-5-1.2-5-5.5 0-1.2.4-2.2 1.1-3-.1-.3-.5-1.4.1-2.9 0 0 .9-.3 3 1.1a10.4 10.4 0 0 1 5.5 0c2.1-1.4 3-1.1 3-1.1.6 1.5.2 2.6.1 2.9.7.8 1.1 1.8 1.1 3 0 4.3-2.6 5.2-5.1 5.5.4.3.8 1 .8 2v3c0 .3.2.6.7.5C19.9 21 23 16.9 23 12c0-6.1-4.9-11-11-11z" />
+                        </svg>
+                    </div>
+                    <h1 class="credentials-card__title">Connect Pulse to GitHub</h1>
+                    <p class="credentials-card__body">No GitHub credentials are configured, so there's nothing to show yet. Add a fine-grained personal access token with <strong>read-only</strong> access to your organisation's repositories:</p>
+                    <div class="credentials-card__snippet">dotnet user-secrets set "GitHub:Token" "&lt;your token&gt;"</div>
+                    <p class="credentials-card__note">Pulse reads commits, pull requests, reviews and comments. It never writes to GitHub, and individual signals are only visible to team leads.</p>
+                    <button type="button" class="credentials-card__cta" @onclick="OnRecheckClicked">Re-check connection</button>
+                </div>
+            </div>
+        }
+        else
+        {
+            @Body
+        }
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">🗙</span>
+</div>
+
+@code {
+    private static readonly int[] PeriodOptions = [7, 14, 30];
+    private const string OrganisationOptionValue = "";
+
+    private readonly CancellationTokenSource _cts = new();
+
+    private int _unseen;
+    private int _needsCheckInCount;
+
+    /// <inheritdoc />
+    protected override async Task OnInitializedAsync()
+    {
+        State.Changed += OnShellDataChanged;
+        AlertService.Changed += OnShellDataChanged;
+        Navigation.LocationChanged += OnLocationChanged;
+        await RefreshAlertStateAsync();
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        State.Changed -= OnShellDataChanged;
+        AlertService.Changed -= OnShellDataChanged;
+        Navigation.LocationChanged -= OnLocationChanged;
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+
+    private void OnShellDataChanged() => _ = InvokeAsync(RefreshAlertStateAsync);
+
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs e) => _ = InvokeAsync(StateHasChanged);
+
+    /// <summary>
+    /// Reloads the roster (cache-backed via <see cref="DashboardQueryService"/>, so this is cheap once a
+    /// page has already fetched the same scope and period) and recomputes the alert pill's unseen count
+    /// and the roster nav badge's needs-check-in count (FR-030, FR-031). Read-only: this never calls
+    /// <see cref="CheckInAlertService.MarkSeen"/> or <c>DashboardBridge.Apply</c> — only the roster view
+    /// marks seen, and the shell's connection/freshness state is exclusively each page's own concern — so
+    /// this method cannot itself trigger another <see cref="DashboardState.Changed"/> or
+    /// <see cref="CheckInAlertService.Changed"/> notification.
+    /// </summary>
+    private async Task RefreshAlertStateAsync()
+    {
+        var scope = State.Scope;
+        var periodDays = State.PeriodDays;
+
+        var roster = await CheckInService.GetRosterAsync(scope, periodDays, _cts.Token);
+
+        if (roster.Composition is { } composition)
+        {
+            var flaggedLogins = composition.Roster
+                .Where(status => status.NeedsCheckIn)
+                .Select(status => status.Developer.Login)
+                .ToList();
+
+            _needsCheckInCount = composition.NeedsCheckInCount;
+            _unseen = AlertService.UnseenCount(scope, periodDays, flaggedLogins);
+        }
+        else
+        {
+            _needsCheckInCount = 0;
+            _unseen = 0;
+        }
+
+        StateHasChanged();
+    }
+
+    /// <summary>Derives the top bar's page title from the current route (contracts/ui-design.md shell).</summary>
+    private string PageTitle
+    {
+        get
+        {
+            var path = Navigation.ToBaseRelativePath(Navigation.Uri).TrimEnd('/');
+            return path switch
+            {
+                "" => "Overview",
+                "team" => "Team overview",
+                "checkins" => "Check-in roster",
+                "quality" => "Quality vs quantity",
+                _ when path.StartsWith("developer/", StringComparison.Ordinal) => "Developer detail",
+                _ when path.StartsWith("project/", StringComparison.Ordinal) => "Project detail",
+                _ => "Pulse",
+            };
+        }
+    }
+
+    private string ScopeSelectValue =>
+        State.Scope.Kind == ScopeKind.Project ? State.Scope.ProjectName ?? OrganisationOptionValue : OrganisationOptionValue;
+
+    private void OnScopeChanged(ChangeEventArgs e)
+    {
+        var value = e.Value?.ToString();
+        State.SetScope(string.IsNullOrEmpty(value) ? ScopeKey.Organisation : ScopeKey.Project(value));
+    }
+
+    private void OnRecheckClicked() => State.RecheckConnection();
+
+    private void OnAlertPillClicked() => Navigation.NavigateTo("/checkins");
+
+    private string ConnectionModifier => State.Connection switch
+    {
+        ConnectionState.Connected => "connected",
+        ConnectionState.RateLimited => "rate-limited",
+        ConnectionState.CredentialsMissing => "credentials-missing",
+        _ => "unknown",
+    };
+
+    private string ConnectionText => State.Connection switch
+    {
+        ConnectionState.Connected => "SignalR connected",
+        ConnectionState.RateLimited => "GitHub paused (rate limit)",
+        ConnectionState.CredentialsMissing => "Not connected",
+        _ => "Unknown",
+    };
+
+    private string FreshnessText => State.DataLoadedAt is { } loadedAt
+        ? $"Data as of {loadedAt.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture)}"
+        : "no data yet";
+
+    private string FreshnessTimeOnly => State.DataLoadedAt is { } loadedAt
+        ? loadedAt.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture)
+        : "an earlier time";
+
+    /// <summary>
+    /// The persistent coverage line (ui-design.md section 3, FR-007). At organisation scope this is the
+    /// design's exact form, naming the repository-cap bound; at project scope the organisation-wide
+    /// repository-cap phrase would misstate coverage as broader than the single selected project, so it is
+    /// replaced with a coverage statement naming that one project instead.
+    /// </summary>
+    private string CoverageLine
+    {
+        get
+        {
+            var loaded = State.DataLoadedAt is { } loadedAt
+                ? loadedAt.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture)
+                : "not yet";
+            var demoSuffix = State.IsDemoData ? " · demo data" : string.Empty;
+
+            if (State.Scope.Kind == ScopeKind.Project)
+            {
+                return $"Project {State.Scope.ProjectName} · last {State.PeriodDays} days · data loaded {loaded}{demoSuffix}";
+            }
+
+            var repoCap = WellnessOptionsAccessor.Value.RepoCap;
+            return $"Organisation · covering the {repoCap} most recently active repositories · last {State.PeriodDays} days · data loaded {loaded}{demoSuffix}";
+        }
+    }
+}

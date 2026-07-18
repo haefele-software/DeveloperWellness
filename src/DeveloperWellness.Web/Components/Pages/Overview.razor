@@ -1,0 +1,538 @@
+@page "/"
+@using System.Globalization
+@implements IDisposable
+@inject DashboardState State
+@inject OverviewService OverviewService
+@inject IOptions<WellnessOptions> WellnessOptionsAccessor
+@inject NavigationManager Navigation
+
+<PageTitle>Pulse — Overview</PageTitle>
+
+<div class="ov-page">
+@if (_lastResult is null)
+{
+    <div class="overview-skeleton" aria-busy="true">
+        <p class="visually-hidden">Loading overview</p>
+        <div class="skeleton-block"></div>
+        <div class="skeleton-block"></div>
+        <div class="skeleton-block"></div>
+        <div class="skeleton-block"></div>
+    </div>
+}
+else if (_lastResult.Source.Snapshot is null || _lastResult.Overview is null)
+{
+    <div class="inline-error" role="alert">
+        <p>@_lastResult.Source.ErrorMessage</p>
+        <button type="button" class="retry-button" @onclick="OnRetryClicked">Try again</button>
+    </div>
+}
+else
+{
+    var snapshot = _lastResult.Source.Snapshot!;
+    var overview = _lastResult.Overview!;
+    var isOrganisationScope = State.Scope.Kind == ScopeKind.Organisation;
+    var scopeLabel = isOrganisationScope ? "Organisation" : $"Project {State.Scope.ProjectName}";
+    var allTeamAverageReviews = ComputeAllTeamAverageReviews(overview.Teams);
+
+    RenderFragment recommendationsSection =
+    @<section class="ov-card ov-recs-card" aria-labelledby="overview-recommendations-heading">
+        <div class="ov-card__header">
+            <h2 id="overview-recommendations-heading" class="ov-card__title">Recommendations for managers</h2>
+            <span class="ov-card__caption">drawn from active signals — suggestions, not instructions</span>
+        </div>
+        @if (overview.Recommendations.Count == 0)
+        {
+            <p class="ov-recs-empty">No recommendations this period — signals are quiet across the board.</p>
+        }
+        else
+        {
+            <ul class="ov-recs-list">
+                @foreach (var recommendation in overview.Recommendations)
+                {
+                    <li class="ov-recs-entry">
+                        <div class="ov-recs-entry__who">
+                            <div class="overview-avatar" style="background-color:@AvatarColor(recommendation.Developer.Login)" aria-hidden="true">@Initials(recommendation.Developer.DisplayName)</div>
+                            <div>
+                                <p class="ov-recs-entry__name">@recommendation.Developer.DisplayName</p>
+                                <p class="ov-recs-entry__team">@recommendation.TeamName</p>
+                            </div>
+                        </div>
+                        <div class="ov-recs-entry__body">
+                            <p class="ov-recs-entry__action">@recommendation.Action</p>
+                            <p class="ov-recs-entry__reason">@recommendation.Reason</p>
+                        </div>
+                        <a class="ov-recs-entry__link" href="@DeveloperDetailUrl(recommendation.Developer.Login)">Open →</a>
+                    </li>
+                }
+            </ul>
+        }
+    </section>;
+
+    @if (_lastResult.Source.Kind != DashboardErrorKind.None)
+    {
+        <p class="stale-notice" role="status">
+            Showing data loaded @snapshot.LoadedAt.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture) — the latest refresh didn't succeed: @_lastResult.Source.ErrorMessage
+        </p>
+    }
+
+    <div class="ov-headline-row">
+        <h1 class="ov-h1">@scopeLabel at a glance</h1>
+        <a class="ov-roster-link" href="/checkins">Open the check-in roster →</a>
+    </div>
+
+    <section class="ov-kpi-grid" aria-label="Wellbeing KPI tiles">
+        <div class="ov-kpi-tile">
+            <span class="ov-kpi-tile__label">Might need a check-in</span>
+            <div class="ov-kpi-tile__value-row">
+                <span class="@KpiValueClass(overview.Kpis.MightNeedCheckIn > 0)">@overview.Kpis.MightNeedCheckIn</span>
+                <span class="ov-kpi-tile__unit">@CheckInCopy.PersonOrPeople(overview.Kpis.MightNeedCheckIn)</span>
+            </div>
+            <span class="ov-kpi-tile__note">@overview.Kpis.NewSinceViewed new since roster last viewed</span>
+        </div>
+        <div class="ov-kpi-tile">
+            <span class="ov-kpi-tile__label">After-hours commits</span>
+            <div class="ov-kpi-tile__value-row">
+                <span class="@KpiValueClass(IsAfterHoursHigh(overview.Kpis.AfterHoursCommitShare))">@FormatShare(overview.Kpis.AfterHoursCommitShare)</span>
+                <span class="ov-kpi-tile__unit">of commits</span>
+            </div>
+            <span class="ov-kpi-tile__note">threshold @ThresholdPercent()% · author-local time</span>
+        </div>
+        <div class="ov-kpi-tile">
+            <span class="ov-kpi-tile__label">After-hours PR activity</span>
+            <div class="ov-kpi-tile__value-row">
+                <span class="@KpiValueClass(IsAfterHoursHigh(overview.Kpis.AfterHoursPrShare))">@FormatShare(overview.Kpis.AfterHoursPrShare)</span>
+                <span class="ov-kpi-tile__unit">of PR events</span>
+            </div>
+            <span class="ov-kpi-tile__note">organisation time</span>
+        </div>
+        @if (isOrganisationScope)
+        {
+            <div class="ov-kpi-tile">
+                <span class="ov-kpi-tile__label">Projects per developer</span>
+                <div class="ov-kpi-tile__value-row">
+                    <span class="@KpiValueClass(IsProjectsPerDeveloperHigh(overview.Kpis.ProjectsPerDeveloper))">@FormatOneDecimal(overview.Kpis.ProjectsPerDeveloper)</span>
+                    <span class="ov-kpi-tile__unit">avg in flight</span>
+                </div>
+                <span class="ov-kpi-tile__note">spread-thin from @SpreadThinThreshold() concurrent</span>
+            </div>
+        }
+        else
+        {
+            <div class="ov-kpi-tile">
+                <span class="ov-kpi-tile__label">Contributors</span>
+                <div class="ov-kpi-tile__value-row">
+                    <span class="ov-kpi-tile__value">@(overview.Kpis.Contributors ?? 0)</span>
+                    <span class="ov-kpi-tile__unit">people</span>
+                </div>
+                <span class="ov-kpi-tile__note">active in this project this period</span>
+            </div>
+        }
+        <div class="ov-kpi-tile">
+            <span class="ov-kpi-tile__label">Review sentiment</span>
+            <div class="ov-kpi-tile__value-row">
+                <span class="@SentimentKpiValueClass(overview.Sentiment)">@SentimentTileValue(overview.Sentiment)</span>
+                @if (overview.Sentiment.Available)
+                {
+                    <span class="ov-kpi-tile__unit">negative</span>
+                }
+            </div>
+            <span class="ov-kpi-tile__note">@SentimentTileNote(overview.Sentiment)</span>
+        </div>
+    </section>
+
+    <section class="ov-card ov-projects-card" aria-labelledby="overview-projects-heading">
+        <div class="ov-card__header">
+            <h2 id="overview-projects-heading" class="ov-card__title">Projects</h2>
+            <span class="ov-card__caption">overall stats per project · click one to open its detail</span>
+        </div>
+        <table class="ov-table">
+            <caption class="visually-hidden">overall stats per project · click one to open its detail</caption>
+            <colgroup>
+                <col style="width:200px" />
+                <col style="width:90px" />
+                <col style="width:90px" />
+                <col style="width:90px" />
+                <col style="width:90px" />
+                <col style="width:100px" />
+                <col style="width:170px" />
+                <col />
+            </colgroup>
+            <thead>
+                <tr>
+                    <th scope="col">Project</th>
+                    <th scope="col" class="ov-table__num">People</th>
+                    <th scope="col" class="ov-table__num">Commits</th>
+                    <th scope="col" class="ov-table__num">PRs</th>
+                    <th scope="col" class="ov-table__num">Reviews</th>
+                    <th scope="col" class="ov-table__num">Comments</th>
+                    <th scope="col">After-hours</th>
+                    <th scope="col">Signals</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in overview.ProjectRows)
+                {
+                    <tr class="ov-table__row" role="button" tabindex="0"
+                        @onclick="() => OnProjectRowActivated(row.Name)"
+                        @onkeydown="e => OnProjectRowKeyDown(e, row.Name)">
+                        <td class="ov-table__name-cell">
+                            <svg class="ov-folder-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                                <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"></path>
+                            </svg>
+                            <span>@row.Name</span>
+                        </td>
+                        <td class="ov-table__num">@row.People</td>
+                        <td class="ov-table__num">@row.Commits</td>
+                        <td class="ov-table__num">@row.PrsOpened</td>
+                        <td class="ov-table__num">@row.Reviews</td>
+                        <td class="ov-table__num">@row.Comments</td>
+                        <td>
+                            <div class="ov-ah-cell" title="@($"After-hours share: {FormatShare(row.AfterHoursShare)}")">
+                                <div class="ov-bar-track">
+                                    <div class="@BarFillClass(IsAfterHoursHigh(row.AfterHoursShare))" style="width:@(BarWidthPercent((row.AfterHoursShare ?? 0m) * 100m, 50m))%"></div>
+                                </div>
+                                <span class="@AhValueClass(IsAfterHoursHigh(row.AfterHoursShare))">@FormatShare(row.AfterHoursShare)</span>
+                            </div>
+                        </td>
+                        <td class="@SignalClass(row.SignalNote)">@row.SignalNote</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </section>
+
+    @if (isOrganisationScope)
+    {
+        <section class="ov-teams-section" aria-labelledby="overview-teams-heading">
+            <div class="ov-teams-header">
+                <h2 id="overview-teams-heading" class="ov-card__title">Teams</h2>
+                <span class="ov-card__caption">click a card for the full table · flags open the person</span>
+            </div>
+            <div class="ov-team-grid">
+                @foreach (var team in overview.Teams)
+                {
+                    <div class="ov-team-card" role="button" tabindex="0"
+                         @onclick="OnTeamCardActivated" @onkeydown="OnTeamCardKeyDown">
+                        <div class="ov-team-card__head">
+                            <span class="ov-team-card__name">@team.Name</span>
+                            <span class="ov-team-card__size">@team.Size devs</span>
+                        </div>
+                        <svg class="ov-team-card__spark" width="100%" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+                            <polyline points="@SparklinePoints(team.WeeklySeries)" fill="none" stroke="#b0b0b0" stroke-width="1.5" vector-effect="non-scaling-stroke"></polyline>
+                        </svg>
+                        <div class="ov-team-card__bars">
+                            <div class="ov-team-bar">
+                                <div class="ov-team-bar__row">
+                                    <span class="ov-team-bar__label">After-hours</span>
+                                    <span class="@TeamBarValueClass(IsTeamAfterHoursHigh(team))">@FormatShare(team.AfterHoursShare)</span>
+                                </div>
+                                <div class="ov-bar-track">
+                                    <div class="@BarFillClass(IsTeamAfterHoursHigh(team))" style="width:@(BarWidthPercent((team.AfterHoursShare ?? 0m) * 100m, 50m))%"></div>
+                                </div>
+                            </div>
+                            <div class="ov-team-bar">
+                                <div class="ov-team-bar__row">
+                                    <span class="ov-team-bar__label">Projects in flight</span>
+                                    <span class="@TeamBarValueClass(IsTeamProjectsHigh(team))">@FormatOneDecimal(team.AvgProjectsInFlight)</span>
+                                </div>
+                                <div class="ov-bar-track">
+                                    <div class="@BarFillClass(IsTeamProjectsHigh(team))" style="width:@(BarWidthPercent(team.AvgProjectsInFlight ?? 0m, 6m))%"></div>
+                                </div>
+                            </div>
+                            <div class="ov-team-bar">
+                                <div class="ov-team-bar__row">
+                                    <span class="ov-team-bar__label">Reviews per dev</span>
+                                    <span class="@TeamBarValueClass(IsTeamReviewsHigh(team, allTeamAverageReviews))">@FormatOneDecimal(team.AvgReviewsPerDev)</span>
+                                </div>
+                                <div class="ov-bar-track">
+                                    <div class="@BarFillClass(IsTeamReviewsHigh(team, allTeamAverageReviews))" style="width:@(BarWidthPercent(team.AvgReviewsPerDev ?? 0m, 15m))%"></div>
+                                </div>
+                            </div>
+                        </div>
+                        @if (team.TopFlagged.Count > 0)
+                        {
+                            <div class="ov-team-card__chips">
+                                @foreach (var flagged in team.TopFlagged)
+                                {
+                                    <a class="ov-flag-chip" href="@DeveloperDetailUrl(flagged.Developer.Login)" title="@FlagCountTitle(flagged.FlagCount)" @onclick:stopPropagation="true">@flagged.Developer.DisplayName</a>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        </section>
+    }
+
+    @if (isOrganisationScope)
+    {
+        <div class="ov-bottom-grid">
+            @recommendationsSection
+            <div class="ov-bottom-grid__side">
+                @if (overview.Trend is { } trend)
+                {
+                    <section class="ov-card ov-card--padded ov-trend-card" aria-labelledby="overview-trend-heading">
+                        <h2 id="overview-trend-heading" class="ov-card__title">Development trend</h2>
+                        <svg class="ov-trend-spark" width="100%" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+                            <polyline points="@SparklinePoints(trend.WeeklyCommits)" fill="none" stroke="var(--accent,#0f6cbd)" stroke-width="1.5" vector-effect="non-scaling-stroke"></polyline>
+                        </svg>
+                        <p class="ov-trend-statement">@trend.ChangeStatement</p>
+                        <p class="ov-trend-note">relative commits per week · @(WellnessOptionsAccessor.Value.TrendWeeks) weeks</p>
+                    </section>
+                }
+                <section class="ov-card ov-card--padded ov-sentiment-card" aria-labelledby="overview-sentiment-heading">
+                    <h2 id="overview-sentiment-heading" class="ov-card__title">Review sentiment</h2>
+                    @if (overview.Sentiment.Available)
+                    {
+                        <div class="ov-sentiment-bar" role="img" aria-label="Review sentiment distribution">
+                            <span class="ov-sentiment-bar__seg ov-sentiment-bar__seg--positive" style="width:@(PercentCss(overview.Sentiment.Positive))%"></span>
+                            <span class="ov-sentiment-bar__seg ov-sentiment-bar__seg--neutral" style="width:@(PercentCss(overview.Sentiment.Neutral))%"></span>
+                            <span class="ov-sentiment-bar__seg ov-sentiment-bar__seg--negative" style="width:@(PercentCss(overview.Sentiment.Negative))%"></span>
+                        </div>
+                        <p class="ov-sentiment-caption">@FormatPercent(overview.Sentiment.Positive)% positive · @FormatPercent(overview.Sentiment.Neutral)% neutral · @FormatPercent(overview.Sentiment.Negative)% negative across analysed comments. Tone concerns surface on the check-in roster, never per comment.</p>
+                    }
+                    else
+                    {
+                        <p class="ov-sentiment-unavailable">Tone signals are currently unavailable — the rest of this page is unaffected.</p>
+                    }
+                </section>
+            </div>
+        </div>
+    }
+    else
+    {
+        @recommendationsSection
+    }
+}
+</div>
+
+@code {
+    private readonly CancellationTokenSource _cts = new();
+
+    private OverviewResult? _lastResult;
+    private (ScopeKey Scope, int PeriodDays)? _loadedKey;
+
+    /// <inheritdoc />
+    protected override async Task OnInitializedAsync()
+    {
+        State.Changed += OnStateChanged;
+        await LoadAsync();
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        State.Changed -= OnStateChanged;
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+
+    private void OnStateChanged()
+    {
+        var currentKey = (State.Scope, State.PeriodDays);
+
+        if (_loadedKey is null || !_loadedKey.Value.Equals(currentKey))
+        {
+            _ = InvokeAsync(LoadAsync);
+        }
+        else
+        {
+            InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        var scope = State.Scope;
+        var periodDays = State.PeriodDays;
+        _loadedKey = (scope, periodDays);
+
+        var result = await OverviewService.GetAsync(scope, periodDays, _cts.Token);
+
+        _lastResult = result;
+        State.Apply(result.Source);
+        StateHasChanged();
+    }
+
+    private async Task OnRetryClicked() => await LoadAsync();
+
+    private void OnProjectRowActivated(string projectName)
+    {
+        State.SetScope(ScopeKey.Project(projectName));
+        Navigation.NavigateTo($"/project/{Uri.EscapeDataString(projectName)}");
+    }
+
+    private void OnProjectRowKeyDown(KeyboardEventArgs e, string projectName)
+    {
+        if (e.Key == "Enter")
+        {
+            OnProjectRowActivated(projectName);
+        }
+    }
+
+    private void OnTeamCardActivated() => Navigation.NavigateTo("/team");
+
+    private void OnTeamCardKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            OnTeamCardActivated();
+        }
+    }
+
+    private int ThresholdPercent() =>
+        (int)Math.Round(WellnessOptionsAccessor.Value.OutOfHoursThreshold * 100m, MidpointRounding.AwayFromZero);
+
+    private int SpreadThinThreshold() => WellnessOptionsAccessor.Value.SpreadThinThreshold;
+
+    private static string FormatShare(decimal? share) =>
+        share is { } value ? $"{Math.Round(value * 100m, MidpointRounding.AwayFromZero):0}%" : "—";
+
+    private static string FormatPercent(decimal share) =>
+        Math.Round(share * 100m, MidpointRounding.AwayFromZero).ToString("0", CultureInfo.InvariantCulture);
+
+    private static string PercentCss(decimal share) =>
+        Math.Round(share * 100m, 2).ToString("0.##", CultureInfo.InvariantCulture);
+
+    private static string FormatOneDecimal(decimal? value) =>
+        value is { } v ? v.ToString("0.0", CultureInfo.InvariantCulture) : "—";
+
+    private bool IsAfterHoursHigh(decimal? share) =>
+        share is { } value && value > WellnessOptionsAccessor.Value.OutOfHoursThreshold;
+
+    private bool IsProjectsPerDeveloperHigh(decimal? avg) =>
+        avg is { } value && value >= WellnessOptionsAccessor.Value.SpreadThinThreshold;
+
+    private bool IsSentimentNegativeHigh(SentimentReading sentiment) =>
+        sentiment.Available && sentiment.Negative > WellnessOptionsAccessor.Value.NegativeToneThreshold;
+
+    /// <summary>Value-text colour class for a KPI tile, a table cell, or a team bar: amber (#8a3707) draws
+    /// attention, the default (#242424) reads as calm — never alarm-red, per the design's amber convention.</summary>
+    private static string KpiValueClass(bool isAmber) =>
+        isAmber ? "ov-kpi-tile__value ov-kpi-tile__value--amber" : "ov-kpi-tile__value";
+
+    private string SentimentKpiValueClass(SentimentReading sentiment) =>
+        !sentiment.Available ? "ov-kpi-tile__value ov-kpi-tile__value--muted"
+            : IsSentimentNegativeHigh(sentiment) ? "ov-kpi-tile__value ov-kpi-tile__value--amber"
+            : "ov-kpi-tile__value";
+
+    private static string BarFillClass(bool isAmber) =>
+        isAmber ? "ov-bar-fill ov-bar-fill--amber" : "ov-bar-fill";
+
+    private static string AhValueClass(bool isAmber) =>
+        isAmber ? "ov-ah-value ov-ah-value--amber" : "ov-ah-value";
+
+    private static string SignalClass(string signalNote) =>
+        signalNote == "quiet" ? "ov-signal" : "ov-signal ov-signal--amber";
+
+    private static string TeamBarValueClass(bool isAmber) =>
+        isAmber ? "ov-team-bar__val ov-team-bar__val--amber" : "ov-team-bar__val";
+
+    private static string FlagCountTitle(int flagCount) =>
+        $"{flagCount} active signal{(flagCount == 1 ? string.Empty : "s")}";
+
+    /// <summary>CSS width percentage for a bar fill, scaled against an illustrative visual ceiling
+    /// (<paramref name="visualMax"/>) rather than a flat 0-100 range, and floored at 3% so an all-quiet
+    /// value still renders a visible sliver — mirrors the design's bar-scaling treatment.</summary>
+    private static string BarWidthPercent(decimal value, decimal visualMax)
+    {
+        if (visualMax <= 0)
+        {
+            return "3";
+        }
+
+        var pct = Math.Clamp(value / visualMax * 100m, 3m, 100m);
+        return pct.ToString("0.##", CultureInfo.InvariantCulture);
+    }
+
+    private bool IsTeamAfterHoursHigh(TeamCard team) =>
+        team.AfterHoursShare is { } share && share > WellnessOptionsAccessor.Value.OutOfHoursThreshold;
+
+    private bool IsTeamProjectsHigh(TeamCard team) =>
+        team.AvgProjectsInFlight is { } avg && avg >= WellnessOptionsAccessor.Value.SpreadThinThreshold;
+
+    private static bool IsTeamReviewsHigh(TeamCard team, decimal allTeamAverageReviews) =>
+        team.AvgReviewsPerDev is { } avg && avg > allTeamAverageReviews;
+
+    /// <summary>The mean <see cref="TeamCard.AvgReviewsPerDev"/> across every team card, used as the amber threshold for each card's own reviews-per-dev bar (attention level: above the all-team average).</summary>
+    private static decimal ComputeAllTeamAverageReviews(IReadOnlyList<TeamCard> teams)
+    {
+        var values = teams.Where(team => team.AvgReviewsPerDev.HasValue).Select(team => team.AvgReviewsPerDev!.Value).ToList();
+        return values.Count == 0 ? 0m : values.Average();
+    }
+
+    /// <summary>Builds an SVG polyline "x,y x,y ..." point list across a 100×26 viewBox for a weekly-count
+    /// series: x spaced evenly 0-100 across the series, y mapped 24 (lowest) to 3 (highest) relative to the
+    /// series' own maximum, so an all-zero series still renders a flat baseline instead of dividing by zero.</summary>
+    private static string SparklinePoints(IReadOnlyList<int> series)
+    {
+        if (series.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var max = Math.Max(series.Max(), 1);
+        var stepX = series.Count > 1 ? 100m / (series.Count - 1) : 0m;
+        var points = new string[series.Count];
+
+        for (var i = 0; i < series.Count; i++)
+        {
+            var x = i * stepX;
+            var ratio = Math.Clamp((decimal)series[i] / max, 0m, 1m);
+            var y = 24m - ratio * 21m;
+            points[i] = $"{x.ToString("0.0", CultureInfo.InvariantCulture)},{y.ToString("0.0", CultureInfo.InvariantCulture)}";
+        }
+
+        return string.Join(' ', points);
+    }
+
+    private string SentimentTileValue(SentimentReading sentiment) =>
+        sentiment.Available ? $"{FormatPercent(sentiment.Negative)}%" : "—";
+
+    private static string SentimentTileNote(SentimentReading sentiment) =>
+        sentiment.Available
+            ? $"{FormatPercent(sentiment.Positive)}% positive · tone flag from 20%"
+            : "tone service unavailable";
+
+    private static string DeveloperDetailUrl(DeveloperLogin login) => $"/developer/{Uri.EscapeDataString(login.Value)}";
+
+    /// <summary>Up to two initials from a display name (first plus last word), for the avatar circle.</summary>
+    private static string Initials(string displayName)
+    {
+        var parts = displayName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+        if (parts.Length == 0)
+        {
+            return "?";
+        }
+
+        return parts.Length == 1
+            ? parts[0][..Math.Min(2, parts[0].Length)].ToUpperInvariant()
+            : $"{parts[0][0]}{parts[^1][0]}".ToUpperInvariant();
+    }
+
+    /// <summary>A deterministic HSL colour derived from the login, so the same person always gets the same avatar colour.</summary>
+    private static string AvatarColor(DeveloperLogin login)
+    {
+        var hue = ((StableHash(login.Value) % 360) + 360) % 360;
+        return $"hsl({hue.ToString(CultureInfo.InvariantCulture)}, 55%, 45%)";
+    }
+
+    /// <summary>
+    /// A simple, process-independent string hash (unlike <see cref="string.GetHashCode()"/>, which is
+    /// randomised per process), so the avatar hue is stable across app restarts and test runs.
+    /// </summary>
+    private static int StableHash(string value)
+    {
+        unchecked
+        {
+            var hash = 23;
+            foreach (var c in value)
+            {
+                hash = hash * 31 + c;
+            }
+
+            return hash;
+        }
+    }
+}

@@ -1,0 +1,48 @@
+@*
+    A single wellbeing flag rendered as an icon-plus-label chip (contracts/ui-design.md section 2 principle
+    6, "no colour-only signals"; SC-010's reason pattern), styled to the approved design's amber chip
+    treatment with a distinct outline icon per kind. The full reason is available on hover via `title` and
+    to assistive tech via `aria-label`. Every FlagKind is handled here so later stories (SpreadThin,
+    NegativeTone, PossibleRushing, OverworkPrActivity) reuse this component without change.
+*@
+
+<span class="@CssClass" title="@Flag.Reason" aria-label="@AriaLabel">
+    <svg class="flag-chip__icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="@IconPath" />
+    </svg>
+    <span class="flag-chip__label">@Label</span>
+</span>
+
+@code {
+    /// <summary>The wellbeing flag to render.</summary>
+    [Parameter, EditorRequired]
+    public required WellbeingFlag Flag { get; set; }
+
+    /// <summary>The Developer detail header's slightly larger chip treatment (ui-design.md 4.4); every other placement (roster, project contributors, table rows) uses the compact default.</summary>
+    [Parameter]
+    public bool Large { get; set; }
+
+    private string CssClass => Large ? "flag-chip flag-chip--large" : "flag-chip";
+
+    private string IconPath => Flag.Kind switch
+    {
+        FlagKind.OverworkCommits => "M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z",
+        FlagKind.OverworkPrActivity => "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20M12 6v6l4 2",
+        FlagKind.SpreadThin => "m12 2-10 5 10 5 10-5-10-5M2 12l10 5 10-5M2 17l10 5 10-5",
+        FlagKind.NegativeTone => "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
+        FlagKind.PossibleRushing => "M13 2 3 14h9l-1 8 10-12h-9l1-8Z",
+        _ => "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
+    };
+
+    private string Label => Flag.Kind switch
+    {
+        FlagKind.OverworkCommits => "Overwork (commits)",
+        FlagKind.OverworkPrActivity => "Overwork (PR activity)",
+        FlagKind.SpreadThin => "Spread thin",
+        FlagKind.NegativeTone => "Tone",
+        FlagKind.PossibleRushing => "Possible rushing",
+        _ => "Signal",
+    };
+
+    private string AriaLabel => $"{Label}: {Flag.Reason}";
+}

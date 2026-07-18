@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DeveloperWellness.Application/DeveloperWellness.Application.csproj" />
+    <Project Path="src/DeveloperWellness.Domain/DeveloperWellness.Domain.csproj" />
+    <Project Path="src/DeveloperWellness.Infrastructure/DeveloperWellness.Infrastructure.csproj" />
+    <Project Path="src/DeveloperWellness.Web/DeveloperWellness.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DeveloperWellness.IntegrationTests/DeveloperWellness.IntegrationTests.csproj" />
+    <Project Path="tests/DeveloperWellness.UnitTests/DeveloperWellness.UnitTests.csproj" />
+  </Folder>
+</Solution>

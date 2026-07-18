@@ -1,0 +1,423 @@
+@page "/developer/{Login}"
+@using System.Globalization
+@implements IDisposable
+@inject DashboardState State
+@inject DashboardQueryService QueryService
+@inject IOptions<WellnessOptions> WellnessOptionsAccessor
+
+<PageTitle>Pulse — @(_lastResult?.Snapshot is { } titleSnapshot ? FindSummary(titleSnapshot)?.Developer.DisplayName ?? Login : Login)</PageTitle>
+
+<p class="developer-detail-back"><a href="/team">← Team overview</a></p>
+
+@if (_lastResult is null)
+{
+    <div class="developer-detail-skeleton" aria-busy="true">
+        <p class="visually-hidden">Loading developer detail</p>
+        <div class="skeleton-block"></div>
+        <div class="skeleton-block"></div>
+        <div class="skeleton-block"></div>
+    </div>
+}
+else if (_lastResult.Snapshot is null)
+{
+    <div class="inline-error" role="alert">
+        <p>@_lastResult.ErrorMessage</p>
+        <button type="button" class="retry-button" @onclick="OnRetryClicked">Try again</button>
+    </div>
+}
+else if (FindSummary(_lastResult.Snapshot) is not { } summary)
+{
+    <div class="developer-not-found">
+        <p>@Login is not on the roster for this scope.</p>
+        <a href="/team">← Team overview</a>
+    </div>
+}
+else
+{
+    var snapshot = _lastResult.Snapshot;
+    var options = WellnessOptionsAccessor.Value;
+    var outOfHoursCommitResult = OutOfHoursCommitCalculator
+        .Calculate(snapshot.Dataset.Events, options, State.PeriodDays)
+        .GetValueOrDefault(summary.Developer.Login);
+    var prAfterHoursResult = PrAfterHoursCalculator
+        .Calculate(snapshot.Dataset.Events, options, State.PeriodDays)
+        .GetValueOrDefault(summary.Developer.Login);
+    var qualitySnapshot = RushingCalculator
+        .Calculate(snapshot.Dataset.Events, options, State.PeriodDays)
+        .GetValueOrDefault(summary.Developer.Login)?.Snapshot;
+
+    <header class="developer-detail-header">
+        <div class="developer-detail-header__avatar" style="background-color:@AvatarColor(summary.Developer.Login)" aria-hidden="true">@Initials(summary.Developer.DisplayName)</div>
+        <div class="developer-detail-header__identity">
+            <h1>@summary.Developer.DisplayName</h1>
+            <p class="developer-detail-subhead">@BuildSubhead(summary, snapshot)</p>
+        </div>
+        <div class="developer-detail-flags">
+            @if (summary.Flags.Count > 0)
+            {
+                @foreach (var flag in summary.Flags)
+                {
+                    <FlagChip Flag="flag" Large="true" />
+                }
+            }
+            else
+            {
+                <span class="signals-steady">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M20 6 9 17l-5-5"></path>
+                    </svg>
+                    Signals steady
+                </span>
+            }
+        </div>
+    </header>
+
+    @if (summary.Flags.Count > 0)
+    {
+        <div class="developer-detail-flag-reasons">
+            @foreach (var flag in summary.Flags)
+            {
+                <div class="checkin-reason">
+                    <span class="checkin-reason__dot" aria-hidden="true"></span>
+                    <span>@flag.Reason</span>
+                </div>
+            }
+        </div>
+    }
+
+    <div class="stat-tiles">
+        <div class="stat-tile">
+            <span class="stat-tile__label">Commits</span>
+            <span class="stat-tile__value">@summary.CommitCount</span>
+            <span class="stat-tile__subtext">@(outOfHoursCommitResult?.OutOfHoursCommits ?? 0) out of hours</span>
+        </div>
+        <div class="stat-tile">
+            <span class="stat-tile__label">PR reviews given</span>
+            <span class="stat-tile__value">@summary.ReviewCount</span>
+            <span class="stat-tile__subtext">each submitted review counts</span>
+        </div>
+        <div class="stat-tile">
+            <span class="stat-tile__label">Comments</span>
+            <span class="stat-tile__value">@summary.CommentCount</span>
+            <span class="stat-tile__subtext">PRs and reviews</span>
+        </div>
+        <div class="stat-tile">
+            <span class="stat-tile__label">PRs opened</span>
+            <span class="stat-tile__value">@summary.PrsOpenedCount</span>
+            <span class="stat-tile__subtext">@PrsOpenedSubtext(qualitySnapshot)</span>
+        </div>
+    </div>
+
+    <div class="developer-detail-columns">
+        <div class="developer-detail-card">
+            <section aria-labelledby="heatmap-heading">
+                <div class="developer-detail-card__title-row">
+                    <h2 id="heatmap-heading" class="developer-detail-card__heading">Time of commits</h2>
+                    <span class="developer-detail-card__subheading">hours × weekdays · author's local time</span>
+                </div>
+                @{
+                    var heatmap = BuildHeatmap(summary, snapshot.Dataset, options);
+                    var maxHeatmapCount = heatmap.SelectMany(row => row).Max(cell => cell.Count);
+                }
+                <div class="heatmap-grid" role="img" aria-label="@HeatmapAriaLabel(summary)">
+                    @for (var day = 0; day < WeekdayLabels.Length; day++)
+                    {
+                        var dayIndex = day;
+                        <div class="heatmap-row">
+                            <span class="heatmap-day-label" aria-hidden="true">@WeekdayLabels[dayIndex]</span>
+                            <div class="heatmap-row__cells">
+                                @for (var hour = 0; hour < HourCount; hour++)
+                                {
+                                    var cell = heatmap[hour][dayIndex];
+                                    <div
+                                        class="@("heatmap-cell " + HeatmapCellCssClass(cell))"
+                                        style="@(cell.Count > 0 ? $"opacity:{HeatmapCellOpacity(cell.Count, maxHeatmapCount).ToString("0.00", CultureInfo.InvariantCulture)}" : null)"
+                                        title="@($"{WeekdayLabels[dayIndex]} {hour:00}:00 — {cell.Count} commit{(cell.Count == 1 ? "" : "s")}")">
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    }
+                    <div class="heatmap-axis">
+                        <span aria-hidden="true"></span>
+                        <div class="heatmap-axis__labels" aria-hidden="true">
+                            <span>00</span><span>06</span><span>09</span><span>18</span><span>23</span>
+                        </div>
+                    </div>
+                </div>
+                <p class="heatmap-legend">
+                    <span class="heatmap-legend__item"><span class="legend-swatch legend-swatch--in-hours" aria-hidden="true"></span>Within working hours (09–18, Mon–Fri)</span>
+                    <span class="heatmap-legend__item"><span class="legend-swatch legend-swatch--out-of-hours" aria-hidden="true"></span>Out of hours</span>
+                </p>
+            </section>
+
+            <section class="share-bar-block share-bar-block--divided" aria-labelledby="ooh-share-heading">
+                <div class="share-bar-block__row">
+                    <h2 id="ooh-share-heading" class="share-bar-block__title">Out-of-hours commit share</h2>
+                    <span class="share-bar-block__value" style="color:@(IsAboveThreshold(summary.OutOfHoursCommitShare, options) ? "#8a3707" : "#242424")">@FormatShare(summary.OutOfHoursCommitShare)</span>
+                </div>
+                <div class="share-bar-block__track" role="img" aria-label="@ShareBarAriaLabel(summary.OutOfHoursCommitShare, options)">
+                    <div class="@("share-bar-block__fill " + (IsAboveThreshold(summary.OutOfHoursCommitShare, options) ? "share-bar-block__fill--amber" : "share-bar-block__fill--accent"))"
+                         style="width:@(SharePercentCss(summary.OutOfHoursCommitShare))%"></div>
+                    <div class="share-bar-block__marker" style="left:@(ThresholdPercentCss(options))%" title="@(ThresholdPercentCss(options))% threshold" aria-hidden="true"></div>
+                </div>
+                <p class="share-bar-block__caption">Marker = @(ThresholdPercentCss(options))% threshold. Evaluated in @(summary.Developer.DisplayName)'s local time from commit timestamps.</p>
+            </section>
+
+            <section class="share-bar-block" aria-labelledby="ooh-pr-share-heading">
+                <div class="share-bar-block__row">
+                    <h2 id="ooh-pr-share-heading" class="share-bar-block__title">Out-of-hours PR activity share</h2>
+                    <span class="share-bar-block__value" style="color:@(IsAboveThreshold(prAfterHoursResult?.Share, options) ? "#8a3707" : "#242424")">@FormatShare(prAfterHoursResult?.Share)</span>
+                </div>
+                <div class="share-bar-block__track" role="img" aria-label="@PrShareBarAriaLabel(prAfterHoursResult, options)">
+                    <div class="@("share-bar-block__fill " + (IsAboveThreshold(prAfterHoursResult?.Share, options) ? "share-bar-block__fill--amber" : "share-bar-block__fill--accent"))"
+                         style="width:@(SharePercentCss(prAfterHoursResult?.Share))%"></div>
+                    <div class="share-bar-block__marker" style="left:@(ThresholdPercentCss(options))%" title="@(ThresholdPercentCss(options))% threshold" aria-hidden="true"></div>
+                </div>
+                <p class="share-bar-block__caption">Evaluated in the organisation timezone — PR events carry no author-local offset.</p>
+            </section>
+        </div>
+
+        <AiSummaryPanel Subject="AiSubject.Developer(summary.Developer.Login)" SubjectDisplayName="@summary.Developer.DisplayName" />
+    </div>
+}
+
+@code {
+    private const int HourCount = 24;
+
+    private static readonly string[] WeekdayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+    private static readonly DayOfWeek[] WeekdayOrder =
+    [
+        DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday,
+        DayOfWeek.Friday, DayOfWeek.Saturday, DayOfWeek.Sunday,
+    ];
+
+    private readonly CancellationTokenSource _cts = new();
+
+    private DashboardResult? _lastResult;
+    private (ScopeKey Scope, int PeriodDays)? _loadedKey;
+
+    /// <summary>The developer login from the route (e.g. <c>/developer/nova-stardust-demo</c>).</summary>
+    [Parameter]
+    public string Login { get; set; } = string.Empty;
+
+    /// <inheritdoc />
+    protected override void OnInitialized()
+    {
+        State.Changed += OnStateChanged;
+    }
+
+    /// <inheritdoc />
+    protected override async Task OnParametersSetAsync()
+    {
+        // The fetched dataset depends only on scope and period, never on the route's Login — navigating
+        // between two developers' pages at the same scope/period must not re-fetch (mirrors TeamOverview's
+        // _loadedKey guard against refetch loops).
+        var currentKey = (State.Scope, State.PeriodDays);
+
+        if (_loadedKey is null || !_loadedKey.Value.Equals(currentKey))
+        {
+            await LoadAsync();
+        }
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        State.Changed -= OnStateChanged;
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+
+    private void OnStateChanged()
+    {
+        var currentKey = (State.Scope, State.PeriodDays);
+
+        if (_loadedKey is null || !_loadedKey.Value.Equals(currentKey))
+        {
+            _ = InvokeAsync(LoadAsync);
+        }
+        else
+        {
+            InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        var scope = State.Scope;
+        var periodDays = State.PeriodDays;
+        _loadedKey = (scope, periodDays);
+
+        var result = await QueryService.GetAsync(scope, periodDays, _cts.Token);
+
+        _lastResult = result;
+        State.Apply(result);
+        StateHasChanged();
+    }
+
+    private async Task OnRetryClicked()
+    {
+        var result = await QueryService.RefreshAsync(State.Scope, State.PeriodDays, _cts.Token);
+
+        _lastResult = result;
+        State.Apply(result);
+        StateHasChanged();
+    }
+
+    private ActivitySummary? FindSummary(DashboardSnapshot snapshot)
+    {
+        if (string.IsNullOrWhiteSpace(Login))
+        {
+            return null;
+        }
+
+        var loginKey = new DeveloperLogin(Login);
+        return snapshot.Summaries.FirstOrDefault(s => s.Developer.Login == loginKey);
+    }
+
+    private string BuildSubhead(ActivitySummary summary, DashboardSnapshot snapshot)
+    {
+        var team = FindTeamName(summary.Developer.Login, snapshot.Dataset.Teams);
+        var scopeLabel = State.Scope.Kind == ScopeKind.Organisation ? "Organisation" : State.Scope.ProjectName!;
+        var projectCount = snapshot.Dataset.Events
+            .Where(e => e.Author == summary.Developer.Login)
+            .Select(e => e.ProjectName)
+            .Distinct(StringComparer.Ordinal)
+            .Count();
+
+        return $"{team} · {scopeLabel} scope · last {State.PeriodDays} days · active in {projectCount} project{(projectCount == 1 ? "" : "s")}";
+    }
+
+    private static string FindTeamName(DeveloperLogin login, IReadOnlyList<Team> teams) =>
+        teams.FirstOrDefault(t => t.Members.Contains(login))?.Name ?? "No team";
+
+    /// <summary>Up to two initials from a display name (first plus last word), for the header avatar circle.</summary>
+    private static string Initials(string displayName)
+    {
+        var parts = displayName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+        if (parts.Length == 0)
+        {
+            return "?";
+        }
+
+        return parts.Length == 1
+            ? parts[0][..Math.Min(2, parts[0].Length)].ToUpperInvariant()
+            : $"{parts[0][0]}{parts[^1][0]}".ToUpperInvariant();
+    }
+
+    /// <summary>A deterministic HSL colour derived from the login, so the same person always gets the same avatar colour (matches CheckIns.razor's roster avatars).</summary>
+    private static string AvatarColor(DeveloperLogin login)
+    {
+        var hue = ((StableHash(login.Value) % 360) + 360) % 360;
+        return $"hsl({hue.ToString(CultureInfo.InvariantCulture)}, 55%, 45%)";
+    }
+
+    /// <summary>
+    /// A simple, process-independent string hash (unlike <see cref="string.GetHashCode()"/>, which is
+    /// randomised per process), so the avatar hue is stable across app restarts and test runs.
+    /// </summary>
+    private static int StableHash(string value)
+    {
+        unchecked
+        {
+            var hash = 23;
+            foreach (var c in value)
+            {
+                hash = hash * 31 + c;
+            }
+
+            return hash;
+        }
+    }
+
+    /// <summary>
+    /// Buckets the developer's commits into a 24 (hour) by 7 (weekday) grid, using
+    /// <see cref="OutOfHoursCommitCalculator.GetLocalTime"/> and
+    /// <see cref="OutOfHoursCommitCalculator.IsOutOfHours"/> as the single source of truth for author-local
+    /// bucketing and in/out classification — this method never re-derives the working-hours rule itself.
+    /// Indexed [hour][day]; the view transposes to day-rows/hour-columns to match the design's grid.
+    /// </summary>
+    private static HeatmapCell[][] BuildHeatmap(ActivitySummary summary, ActivityDataset dataset, WellnessOptions options)
+    {
+        var totals = new int[HourCount, WeekdayLabels.Length];
+        var outOfHoursCounts = new int[HourCount, WeekdayLabels.Length];
+
+        foreach (var commit in dataset.Events.OfType<CommitEvent>())
+        {
+            if (commit.Author != summary.Developer.Login)
+            {
+                continue;
+            }
+
+            var local = OutOfHoursCommitCalculator.GetLocalTime(commit, options);
+            var dayIndex = Array.IndexOf(WeekdayOrder, local.DayOfWeek);
+            var hour = local.Hour;
+
+            totals[hour, dayIndex]++;
+            if (OutOfHoursCommitCalculator.IsOutOfHours(commit, options))
+            {
+                outOfHoursCounts[hour, dayIndex]++;
+            }
+        }
+
+        var rows = new HeatmapCell[HourCount][];
+        for (var hour = 0; hour < HourCount; hour++)
+        {
+            var row = new HeatmapCell[WeekdayLabels.Length];
+            for (var day = 0; day < WeekdayLabels.Length; day++)
+            {
+                var total = totals[hour, day];
+                var outOfHours = outOfHoursCounts[hour, day];
+
+                // A hint of imprecision at non-hour-aligned working-hours boundaries is possible when a
+                // cell mixes in-hours and out-of-hours commits; majority (ties favour out-of-hours) decides
+                // the cell's tint, since the default 09:00/18:00 boundary keeps every cell homogeneous.
+                row[day] = new HeatmapCell(total, total > 0 && outOfHours * 2 >= total);
+            }
+
+            rows[hour] = row;
+        }
+
+        return rows;
+    }
+
+    private static string HeatmapCellCssClass(HeatmapCell cell) =>
+        cell.Count == 0 ? string.Empty : cell.IsOutOfHours ? "heatmap-cell--out" : "heatmap-cell--in";
+
+    private static decimal HeatmapCellOpacity(int count, int maxCount) =>
+        maxCount <= 0 ? 0m : 0.35m + 0.65m * count / maxCount;
+
+    private static string HeatmapAriaLabel(ActivitySummary summary) =>
+        $"Commit heatmap for {summary.Developer.DisplayName} by hour and weekday, in author-local time";
+
+    private static bool IsAboveThreshold(decimal? share, WellnessOptions options) =>
+        share is { } value && value > options.OutOfHoursThreshold;
+
+    /// <summary>The share as a bare CSS percentage number (no "%" suffix), for a <c>width</c> style value.</summary>
+    private static string SharePercentCss(decimal? share) =>
+        Math.Round((share ?? 0m) * 100m, 2).ToString("0.##", CultureInfo.InvariantCulture);
+
+    /// <summary>The configured threshold as a bare CSS percentage number (no "%" suffix), for the marker's <c>left</c> style value.</summary>
+    private static string ThresholdPercentCss(WellnessOptions options) =>
+        (options.OutOfHoursThreshold * 100m).ToString("0.##", CultureInfo.InvariantCulture);
+
+    private static string FormatShare(decimal? share) =>
+        share is { } value ? $"{Math.Round(value * 100m, MidpointRounding.AwayFromZero):0}%" : "—";
+
+    /// <summary>The PRs-opened stat tile's subtext (ui-design.md section 4.4): the changes-requested share once <see cref="QualityQuantitySnapshot.SufficientSample"/> holds, otherwise the below-sample note — mirroring the <c>/quality</c> page's own sample guard (FR-027).</summary>
+    private static string PrsOpenedSubtext(QualityQuantitySnapshot? snapshot) =>
+        snapshot is { SufficientSample: true, ChangesRequestedShare: { } share }
+            ? $"{Math.Round(share * 100m, MidpointRounding.AwayFromZero):0}% saw changes requested"
+            : "below review-data sample";
+
+    private static string ShareBarAriaLabel(decimal? share, WellnessOptions options) =>
+        $"Out-of-hours commit share: {FormatShare(share)}, threshold {ThresholdPercentCss(options)}%";
+
+    private static string PrShareBarAriaLabel(PrAfterHoursResult? result, WellnessOptions options) =>
+        $"Out-of-hours PR activity share: {FormatShare(result?.Share)}, threshold {ThresholdPercentCss(options)}%";
+
+    private sealed record HeatmapCell(int Count, bool IsOutOfHours);
+}

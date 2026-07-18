@@ -1,0 +1,424 @@
+@page "/team"
+@using System.Globalization
+@implements IDisposable
+@inject DashboardState State
+@inject CheckInService CheckInService
+@inject IOptions<WellnessOptions> WellnessOptionsAccessor
+
+<PageTitle>Pulse — Team overview</PageTitle>
+
+<div class="team-overview-page">
+    <div class="team-overview-head">
+        <h1 class="team-overview-headline">@CheckInCopy.Headline(_lastResult?.Composition?.NeedsCheckInCount ?? 0)</h1>
+        <a class="team-overview-roster-link" href="/checkins">View the roster →</a>
+        <span class="team-overview-order-note">Default order: flagged first, then alphabetical — never a ranking.</span>
+    </div>
+
+    @if (_lastResult is null)
+    {
+        var isOrgScopeLoading = State.Scope.Kind == ScopeKind.Organisation;
+
+        <div class="team-overview-card">
+            <table class="team-table" aria-busy="true">
+                <caption class="visually-hidden">Loading team activity</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Developer</th>
+                        <th scope="col">Commits</th>
+                        <th scope="col">PR reviews</th>
+                        <th scope="col">Comments</th>
+                        <th scope="col">OOH commits</th>
+                        <th scope="col">OOH PRs</th>
+                        @if (isOrgScopeLoading)
+                        {
+                            <th scope="col">Projects</th>
+                        }
+                        <th scope="col">Flags</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @for (var i = 0; i < 5; i++)
+                    {
+                        <tr class="skeleton-row">
+                            <td colspan="@(isOrgScopeLoading ? 8 : 7)">&nbsp;</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+    else if (_lastResult.Source.Snapshot is null)
+    {
+        <div class="inline-error" role="alert">
+            <p>@_lastResult.Source.ErrorMessage</p>
+            <button type="button" class="retry-button" @onclick="OnRetryClicked">Try again</button>
+        </div>
+    }
+    else
+    {
+        var snapshot = _lastResult.Source.Snapshot;
+        var isOrgScope = State.Scope.Kind == ScopeKind.Organisation;
+        var activeSummaries = snapshot.Summaries.Where(s => s.HasActivity).ToList();
+        var noActivitySummaries = snapshot.Summaries
+            .Where(s => !s.HasActivity)
+            .OrderBy(s => s.Developer.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        @if (_lastResult.Source.Kind != DashboardErrorKind.None)
+        {
+            <p class="stale-notice" role="status">
+                Showing data loaded @snapshot.LoadedAt.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture) — the latest refresh didn't succeed: @_lastResult.Source.ErrorMessage
+            </p>
+        }
+
+        @if (snapshot.Summaries.Count > 0 && activeSummaries.Count == 0)
+        {
+            <p class="empty-period-notice">This period has no recorded activity at all across the team.</p>
+        }
+
+        <div class="team-overview-card">
+            <table class="team-table">
+                <colgroup>
+                    <col class="team-col-developer" />
+                    @if (isOrgScope)
+                    {
+                        <col style="width:76px" />
+                        <col style="width:84px" />
+                        <col style="width:84px" />
+                        <col style="width:106px" />
+                        <col style="width:106px" />
+                        <col style="width:74px" />
+                    }
+                    else
+                    {
+                        <col style="width:84px" />
+                        <col style="width:90px" />
+                        <col style="width:90px" />
+                        <col style="width:112px" />
+                        <col style="width:112px" />
+                    }
+                    <col />
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th scope="col" aria-sort="@SortAriaValue(SortColumn.Developer)">
+                            <button type="button" @onclick="() => OnSortClick(SortColumn.Developer)">Developer@(SortIndicator(SortColumn.Developer))</button>
+                        </th>
+                        <th scope="col" aria-sort="@SortAriaValue(SortColumn.Commits)">
+                            <button type="button" @onclick="() => OnSortClick(SortColumn.Commits)">Commits@(SortIndicator(SortColumn.Commits))</button>
+                        </th>
+                        <th scope="col" aria-sort="@SortAriaValue(SortColumn.Reviews)">
+                            <button type="button" @onclick="() => OnSortClick(SortColumn.Reviews)">PR reviews@(SortIndicator(SortColumn.Reviews))</button>
+                        </th>
+                        <th scope="col" aria-sort="@SortAriaValue(SortColumn.Comments)">
+                            <button type="button" @onclick="() => OnSortClick(SortColumn.Comments)">Comments@(SortIndicator(SortColumn.Comments))</button>
+                        </th>
+                        <th scope="col" aria-sort="@SortAriaValue(SortColumn.OutOfHoursCommits)">
+                            <button type="button" @onclick="() => OnSortClick(SortColumn.OutOfHoursCommits)">OOH commits@(SortIndicator(SortColumn.OutOfHoursCommits))</button>
+                        </th>
+                        <th scope="col" aria-sort="@SortAriaValue(SortColumn.OutOfHoursPrs)">
+                            <button type="button" @onclick="() => OnSortClick(SortColumn.OutOfHoursPrs)">OOH PRs@(SortIndicator(SortColumn.OutOfHoursPrs))</button>
+                        </th>
+                        @if (isOrgScope)
+                        {
+                            <th scope="col" aria-sort="@SortAriaValue(SortColumn.Projects)">
+                                <button type="button" @onclick="() => OnSortClick(SortColumn.Projects)">Projects@(SortIndicator(SortColumn.Projects))</button>
+                            </th>
+                        }
+                        <th scope="col">Flags</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var summary in SortActive(activeSummaries))
+                    {
+                        <tr>
+                            <td>
+                                <span class="team-dev-cell">
+                                    <span class="team-avatar" style="background-color:@AvatarColor(summary.Developer.Login)" aria-hidden="true">@Initials(summary.Developer.DisplayName)</span>
+                                    <a href="@DeveloperDetailUrl(summary.Developer.Login)">@summary.Developer.DisplayName</a>
+                                </span>
+                            </td>
+                            <td>@summary.CommitCount</td>
+                            <td>@summary.ReviewCount</td>
+                            <td>@summary.CommentCount</td>
+                            <td class="@(IsOutOfHoursShareHigh(summary.OutOfHoursCommitShare) ? "ooh-cell ooh-cell--high" : "ooh-cell")">
+                                @FormatOutOfHoursShare(summary.OutOfHoursCommitShare)
+                            </td>
+                            <td class="@(IsOutOfHoursShareHigh(summary.OutOfHoursPrShare) ? "ooh-cell ooh-cell--high" : "ooh-cell")">
+                                @FormatOutOfHoursShare(summary.OutOfHoursPrShare)
+                            </td>
+                            @if (isOrgScope)
+                            {
+                                <td>@FormatProjectCount(summary.DistinctProjectCount)</td>
+                            }
+                            <td>
+                                @{ var rosterFlags = FlagsFor(summary.Developer.Login); }
+                                @if (rosterFlags.Count > 0)
+                                {
+                                    <div class="flag-chip-row">
+                                        @foreach (var flag in rosterFlags)
+                                        {
+                                            <FlagChip Flag="flag" />
+                                        }
+                                    </div>
+                                }
+                                else
+                                {
+                                    <span class="no-flags">—</span>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+
+            @if (noActivitySummaries.Count > 0)
+            {
+                <section class="no-activity-group" aria-labelledby="no-activity-heading">
+                    <h2 id="no-activity-heading">No recorded activity this period</h2>
+                    <ul>
+                        @foreach (var summary in noActivitySummaries)
+                        {
+                            <li>
+                                <span class="team-avatar team-avatar--muted" aria-hidden="true">@Initials(summary.Developer.DisplayName)</span>
+                                <a class="dev-name" href="@DeveloperDetailUrl(summary.Developer.Login)">@summary.Developer.DisplayName</a>
+                                <span class="no-activity-caption">No activity — still part of the team</span>
+                            </li>
+                        }
+                    </ul>
+                </section>
+            }
+
+            @if (HasUnmatchedActivity(snapshot.Unmatched))
+            {
+                <p class="unmatched-line">
+                    <svg class="unmatched-line__icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9"></circle>
+                        <path d="M9.5 9.5h.01M14.5 9.5h.01M9 15h6"></path>
+                    </svg>
+                    <span><strong>Unmatched activity:</strong> @DescribeUnmatched(snapshot.Unmatched) — counted here, never against anyone.</span>
+                </p>
+            }
+        </div>
+
+        <footer class="team-overview-footer">
+            <p>Out-of-hours commits are evaluated in each author's local time; PR activity uses the organisation timezone because PR events carry no local offset. Flags are conversation prompts, not verdicts — hover any flag for its reason, or open a person's page for the full picture.</p>
+        </footer>
+    }
+</div>
+
+@code {
+    private enum SortColumn
+    {
+        None,
+        Developer,
+        Commits,
+        Reviews,
+        Comments,
+        OutOfHoursCommits,
+        OutOfHoursPrs,
+        Projects,
+    }
+
+    private readonly CancellationTokenSource _cts = new();
+
+    private CheckInRosterResult? _lastResult;
+    private (ScopeKey Scope, int PeriodDays)? _loadedKey;
+    private SortColumn _sortColumn = SortColumn.None;
+    private bool _sortDescending;
+
+    /// <inheritdoc />
+    protected override async Task OnInitializedAsync()
+    {
+        State.Changed += OnStateChanged;
+        await LoadAsync();
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        State.Changed -= OnStateChanged;
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+
+    private void OnStateChanged()
+    {
+        var currentKey = (State.Scope, State.PeriodDays);
+
+        if (_loadedKey is null || !_loadedKey.Value.Equals(currentKey))
+        {
+            _ = InvokeAsync(LoadAsync);
+        }
+        else
+        {
+            InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        var scope = State.Scope;
+        var periodDays = State.PeriodDays;
+        _loadedKey = (scope, periodDays);
+
+        var result = await CheckInService.GetRosterAsync(scope, periodDays, _cts.Token);
+
+        _lastResult = result;
+        State.Apply(result.Source);
+        StateHasChanged();
+    }
+
+    private async Task OnRetryClicked()
+    {
+        var result = await CheckInService.RefreshRosterAsync(State.Scope, State.PeriodDays, _cts.Token);
+
+        _lastResult = result;
+        State.Apply(result.Source);
+        StateHasChanged();
+    }
+
+    private void OnSortClick(SortColumn column)
+    {
+        if (_sortColumn == column)
+        {
+            _sortDescending = !_sortDescending;
+        }
+        else
+        {
+            _sortColumn = column;
+            _sortDescending = false;
+        }
+    }
+
+    private List<ActivitySummary> SortActive(IReadOnlyList<ActivitySummary> active)
+    {
+        if (_sortColumn == SortColumn.None)
+        {
+            return active
+                .OrderBy(s => FlagsFor(s.Developer.Login).Count == 0)
+                .ThenBy(s => s.Developer.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        return (_sortColumn switch
+        {
+            SortColumn.Developer => Order(active, s => s.Developer.DisplayName, StringComparer.OrdinalIgnoreCase),
+            SortColumn.Commits => Order(active, s => s.CommitCount),
+            SortColumn.Reviews => Order(active, s => s.ReviewCount),
+            SortColumn.Comments => Order(active, s => s.CommentCount),
+            SortColumn.OutOfHoursCommits => Order(active, s => s.OutOfHoursCommitShare ?? decimal.MinValue),
+            SortColumn.OutOfHoursPrs => Order(active, s => s.OutOfHoursPrShare ?? decimal.MinValue),
+            SortColumn.Projects => Order(active, s => s.DistinctProjectCount ?? -1),
+            _ => Order(active, s => s.Developer.DisplayName, StringComparer.OrdinalIgnoreCase),
+        }).ToList();
+
+        IOrderedEnumerable<ActivitySummary> Order<TKey>(IReadOnlyList<ActivitySummary> source, Func<ActivitySummary, TKey> keySelector, IComparer<TKey>? comparer = null) =>
+            _sortDescending ? source.OrderByDescending(keySelector, comparer) : source.OrderBy(keySelector, comparer);
+    }
+
+    private string? SortAriaValue(SortColumn column)
+    {
+        if (_sortColumn != column)
+        {
+            return "none";
+        }
+
+        return _sortDescending ? "descending" : "ascending";
+    }
+
+    private string SortIndicator(SortColumn column)
+    {
+        if (_sortColumn != column)
+        {
+            return string.Empty;
+        }
+
+        return _sortDescending ? " ▼" : " ▲";
+    }
+
+    private static string DeveloperDetailUrl(DeveloperLogin login) => $"/developer/{Uri.EscapeDataString(login.Value)}";
+
+    private static string FormatOutOfHoursShare(decimal? share) =>
+        share is { } value ? $"{Math.Round(value * 100m, MidpointRounding.AwayFromZero):0}%" : "—";
+
+    private bool IsOutOfHoursShareHigh(decimal? share) =>
+        share is { } value && value > WellnessOptionsAccessor.Value.OutOfHoursThreshold;
+
+    /// <summary>The distinct-project count for the Projects cell (organisation scope only); an em-dash when null or zero (data-model.md, FR-008).</summary>
+    private static string FormatProjectCount(int? count) =>
+        count is { } value && value > 0 ? value.ToString(CultureInfo.InvariantCulture) : "—";
+
+    /// <summary>
+    /// The composed roster's merged flags for a developer — tone and possible-rushing included, unlike
+    /// <see cref="ActivitySummary.Flags"/> alone (those two are layered in only by
+    /// <see cref="Domain.Signals.CheckInComposer"/>, per <see cref="CheckInService"/>). Empty when the
+    /// roster carries no entry for this login (should not happen once a snapshot has loaded, since the
+    /// roster is composed from the same summaries this page renders).
+    /// </summary>
+    private IReadOnlyList<WellbeingFlag> FlagsFor(DeveloperLogin login) =>
+        _lastResult?.Composition?.Roster.FirstOrDefault(status => status.Developer.Login.Equals(login))?.Flags ?? [];
+
+    private static bool HasUnmatchedActivity(UnmatchedActivity unmatched) =>
+        unmatched.CommitCount + unmatched.ReviewCount + unmatched.CommentCount + unmatched.PrsOpenedCount > 0;
+
+    private static string DescribeUnmatched(UnmatchedActivity unmatched)
+    {
+        var parts = new List<string>();
+
+        AddPart(parts, unmatched.CommitCount, "commit", "commits");
+        AddPart(parts, unmatched.ReviewCount, "review", "reviews");
+        AddPart(parts, unmatched.CommentCount, "comment", "comments");
+        AddPart(parts, unmatched.PrsOpenedCount, "PR opened", "PRs opened");
+
+        return string.Join(", ", parts);
+
+        static void AddPart(List<string> parts, int count, string singular, string plural)
+        {
+            if (count > 0)
+            {
+                parts.Add($"{count} {(count == 1 ? singular : plural)}");
+            }
+        }
+    }
+
+    /// <summary>Up to two initials from a display name (first plus last word), for the avatar circle.</summary>
+    private static string Initials(string displayName)
+    {
+        var parts = displayName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+        if (parts.Length == 0)
+        {
+            return "?";
+        }
+
+        return parts.Length == 1
+            ? parts[0][..Math.Min(2, parts[0].Length)].ToUpperInvariant()
+            : $"{parts[0][0]}{parts[^1][0]}".ToUpperInvariant();
+    }
+
+    /// <summary>A deterministic HSL colour derived from the login, so the same person always gets the same avatar colour.</summary>
+    private static string AvatarColor(DeveloperLogin login)
+    {
+        var hue = ((StableHash(login.Value) % 360) + 360) % 360;
+        return $"hsl({hue.ToString(CultureInfo.InvariantCulture)}, 55%, 45%)";
+    }
+
+    /// <summary>
+    /// A simple, process-independent string hash (unlike <see cref="string.GetHashCode()"/>, which is
+    /// randomised per process), so the avatar hue is stable across app restarts and test runs.
+    /// </summary>
+    private static int StableHash(string value)
+    {
+        unchecked
+        {
+            var hash = 23;
+            foreach (var c in value)
+            {
+                hash = hash * 31 + c;
+            }
+
+            return hash;
+        }
+    }
+}

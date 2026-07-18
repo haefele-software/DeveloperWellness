@@ -1,0 +1,199 @@
+/* ---------------------------------------------------------------------------------------------
+   Check-in roster (contracts/ui-design.md section 4.3). Pixel values below are read directly from
+   the approved design export; reuses the shared .inline-error / .retry-button / .stale-notice /
+   .skeleton-block classes other pages already use for their loading and error states.
+   --------------------------------------------------------------------------------------------- */
+
+.checkin-page {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    max-width: 980px;
+}
+
+.checkin-heading-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.checkin-headline {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+}
+
+.checkin-sub {
+    margin: 4px 0 0;
+    font-size: 12.5px;
+    color: #616161;
+}
+
+.checkin-tone-unavailable {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 12.5px;
+    color: #616161;
+}
+
+.checkin-frustration {
+    display: flex;
+    gap: 10px;
+    background: #fff9f0;
+    border: 1px solid #f2d0a4;
+    border-radius: 8px;
+    padding: 12px 15px;
+    font-size: 12.5px;
+    color: #8a3707;
+    line-height: 1.5;
+}
+
+.checkin-frustration svg {
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+
+.checkin-empty {
+    background: #f1faf1;
+    border: 1px solid #c3e3c3;
+    border-radius: 10px;
+    padding: 34px 30px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+}
+
+.checkin-empty__icon {
+    flex-shrink: 0;
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    background: #107c10;
+    color: #fff;
+    display: grid;
+    place-items: center;
+}
+
+.checkin-empty__heading {
+    font-size: 17px;
+    font-weight: 600;
+    color: #0e700e;
+}
+
+.checkin-empty__body {
+    margin-top: 4px;
+    font-size: 13px;
+    color: #424242;
+    line-height: 1.5;
+}
+
+.checkin-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.checkin-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.checkin-entry {
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .04);
+    padding: 15px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.checkin-entry__top {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+}
+
+.checkin-avatar {
+    flex-shrink: 0;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 600;
+    font-size: 12px;
+}
+
+.checkin-entry__identity {
+    display: flex;
+    flex-direction: column;
+}
+
+.checkin-entry__name {
+    margin: 0;
+    font-size: 14.5px;
+    font-weight: 600;
+}
+
+.checkin-entry__team {
+    margin: 0;
+    font-size: 11.5px;
+    color: #666;
+}
+
+.checkin-entry__flags {
+    margin-left: auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    justify-content: flex-end;
+}
+
+.checkin-entry__reasons {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    border-top: 1px solid #f0f0f0;
+    padding-top: 10px;
+}
+
+.checkin-reason {
+    display: flex;
+    gap: 9px;
+    font-size: 12.5px;
+    color: #424242;
+    line-height: 1.5;
+}
+
+.checkin-reason__dot {
+    flex-shrink: 0;
+    width: 5px;
+    height: 5px;
+    margin-top: 7px;
+    border-radius: 50%;
+    background: #c48733;
+}
+
+.checkin-entry__link {
+    align-self: flex-start;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.checkin-entry__link:hover {
+    text-decoration: underline;
+}

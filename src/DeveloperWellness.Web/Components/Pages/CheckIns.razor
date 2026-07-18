@@ -1,0 +1,263 @@
+@page "/checkins"
+@using System.Globalization
+@implements IDisposable
+@inject DashboardState State
+@inject CheckInService CheckInService
+@inject CheckInAlertService AlertService
+
+<PageTitle>Pulse — Check-in roster</PageTitle>
+
+@if (_lastRoster is null)
+{
+    <div class="checkin-skeleton" aria-busy="true">
+        <p class="visually-hidden">Loading check-in roster</p>
+        <div class="skeleton-block"></div>
+        <div class="skeleton-block"></div>
+        <div class="skeleton-block"></div>
+    </div>
+}
+else if (_lastRoster.Source.Snapshot is null)
+{
+    <div class="inline-error" role="alert">
+        <p>@_lastRoster.Source.ErrorMessage</p>
+        <button type="button" class="retry-button" @onclick="OnRetryClicked">Try again</button>
+    </div>
+}
+else
+{
+    var snapshot = _lastRoster.Source.Snapshot;
+    var composition = _lastRoster.Composition!;
+    var flaggedEntries = composition.Roster.Where(status => status.NeedsCheckIn).ToList();
+
+    <div class="checkin-page">
+        @if (_lastRoster.Source.Kind != DashboardErrorKind.None)
+        {
+            <p class="stale-notice" role="status">
+                Showing data loaded @snapshot.LoadedAt.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture) — the latest refresh didn't succeed: @_lastRoster.Source.ErrorMessage
+            </p>
+        }
+
+        <div class="checkin-heading-group">
+            <h1 class="checkin-headline">@CheckInCopy.Headline(composition.NeedsCheckInCount)</h1>
+            <p class="checkin-sub">@SubLine(State)</p>
+        </div>
+
+        @if (!_lastRoster.ToneAvailable)
+        {
+            <div class="checkin-tone-unavailable">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9"></circle>
+                    <path d="M12 8v4M12 16h.01"></path>
+                </svg>
+                <span>Tone signals are currently unavailable, so this roster reflects activity signals only.</span>
+            </div>
+        }
+
+        @if (_lastRoster.ToneFlaggedNames.Count > 0)
+        {
+            <div class="checkin-frustration">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                </svg>
+                <span>There's some frustration showing in review comments: @FormatToneFlaggedNames(_lastRoster.ToneFlaggedNames)@(_lastRoster.ToneFlaggedNames is [var only] && !only.EndsWith('s') ? "'s" : "'") comments read more negative than usual this period. It's climate, not character — review pressure is usually the cause.</span>
+            </div>
+        }
+
+        @if (composition.NeedsCheckInCount == 0)
+        {
+            <div class="checkin-empty">
+                <div class="checkin-empty__icon" aria-hidden="true">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M20 6 9 17l-5-5"></path>
+                    </svg>
+                </div>
+                <div>
+                    <div class="checkin-empty__heading">Nobody appears to need a check-in right now</div>
+                    <div class="checkin-empty__body">Across @CoverageDescription(State.Scope), every signal sits in its normal range. That's the outcome this dashboard is for — enjoy it.</div>
+                </div>
+            </div>
+        }
+
+        @if (flaggedEntries.Count > 0)
+        {
+            <ul class="checkin-list">
+                @foreach (var status in flaggedEntries)
+                {
+                    <li class="checkin-entry">
+                        <div class="checkin-entry__top">
+                            <div class="checkin-avatar" style="background-color:@AvatarColor(status.Developer.Login)" aria-hidden="true">@Initials(status.Developer.DisplayName)</div>
+                            <div class="checkin-entry__identity">
+                                <h2 class="checkin-entry__name">@status.Developer.DisplayName</h2>
+                                <p class="checkin-entry__team">@TeamName(status.Developer.Login, snapshot.Dataset.Teams)</p>
+                            </div>
+                            <div class="checkin-entry__flags">
+                                @foreach (var flag in status.Flags)
+                                {
+                                    <FlagChip Flag="flag" />
+                                }
+                            </div>
+                        </div>
+                        <div class="checkin-entry__reasons">
+                            @foreach (var flag in status.Flags)
+                            {
+                                <div class="checkin-reason">
+                                    <span class="checkin-reason__dot" aria-hidden="true"></span>
+                                    <span>@flag.Reason</span>
+                                </div>
+                            }
+                        </div>
+                        <a class="checkin-entry__link" href="@DeveloperDetailUrl(status.Developer.Login)">View @(status.Developer.DisplayName)'s detail →</a>
+                    </li>
+                }
+            </ul>
+        }
+    </div>
+}
+
+@code {
+    private readonly CancellationTokenSource _cts = new();
+
+    private CheckInRosterResult? _lastRoster;
+    private (ScopeKey Scope, int PeriodDays)? _loadedKey;
+
+    /// <inheritdoc />
+    protected override async Task OnInitializedAsync()
+    {
+        State.Changed += OnStateChanged;
+        await LoadAsync();
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        State.Changed -= OnStateChanged;
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+
+    private void OnStateChanged()
+    {
+        var currentKey = (State.Scope, State.PeriodDays);
+
+        if (_loadedKey is null || !_loadedKey.Value.Equals(currentKey))
+        {
+            _ = InvokeAsync(LoadAsync);
+        }
+        else
+        {
+            InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        var scope = State.Scope;
+        var periodDays = State.PeriodDays;
+        _loadedKey = (scope, periodDays);
+
+        var result = await CheckInService.GetRosterAsync(scope, periodDays, _cts.Token);
+        ApplyResult(scope, periodDays, result);
+    }
+
+    private async Task OnRetryClicked()
+    {
+        var scope = State.Scope;
+        var periodDays = State.PeriodDays;
+
+        var result = await CheckInService.RefreshRosterAsync(scope, periodDays, _cts.Token);
+        ApplyResult(scope, periodDays, result);
+    }
+
+    /// <summary>
+    /// Applies a freshly fetched roster result to the page and shell state, then marks every currently
+    /// flagged developer as seen (FR-031: viewing the roster clears the alert indicator for them).
+    /// </summary>
+    private void ApplyResult(ScopeKey scope, int periodDays, CheckInRosterResult result)
+    {
+        _lastRoster = result;
+        State.Apply(result.Source);
+
+        if (result.Composition is { } composition)
+        {
+            var flaggedLogins = composition.Roster
+                .Where(status => status.NeedsCheckIn)
+                .Select(status => status.Developer.Login)
+                .ToList();
+
+            AlertService.MarkSeen(scope, periodDays, flaggedLogins);
+        }
+
+        StateHasChanged();
+    }
+
+    /// <summary>The {coverage} clause of the positive empty state (ui-design.md 4.3): "the whole organisation" or "project {name}".</summary>
+    private static string CoverageDescription(ScopeKey scope) =>
+        scope.Kind == ScopeKind.Organisation ? "the whole organisation" : $"project {scope.ProjectName}";
+
+    /// <summary>
+    /// "{Scope} · last {N} days · ordered by number of concurrent signals", plus the project-scope
+    /// spread-thin caption (ui-design.md 4.3).
+    /// </summary>
+    private static string SubLine(DashboardState state)
+    {
+        var scopeLabel = state.Scope.Kind == ScopeKind.Organisation ? "Organisation" : $"Project {state.Scope.ProjectName}";
+        var baseLine = $"{scopeLabel} · last {state.PeriodDays} days · ordered by number of concurrent signals";
+
+        return state.Scope.Kind == ScopeKind.Project
+            ? $"{baseLine} · project scope: spread-thin isn't assessed here"
+            : baseLine;
+    }
+
+    /// <summary>Joins tone-flagged display names naturally for the frustration paragraph (ui-design.md 4.3): one name alone, two joined by "and", three or more comma-separated with a final "and".</summary>
+    private static string FormatToneFlaggedNames(IReadOnlyList<string> names) => names.Count switch
+    {
+        1 => names[0],
+        2 => $"{names[0]} and {names[1]}",
+        _ => $"{string.Join(", ", names.Take(names.Count - 1))}, and {names[^1]}",
+    };
+
+    private static string TeamName(DeveloperLogin login, IReadOnlyList<Team> teams) =>
+        teams.FirstOrDefault(t => t.Members.Contains(login))?.Name ?? "No team";
+
+    private static string DeveloperDetailUrl(DeveloperLogin login) => $"/developer/{Uri.EscapeDataString(login.Value)}";
+
+    /// <summary>Up to two initials from a display name (first plus last word), for the avatar circle.</summary>
+    private static string Initials(string displayName)
+    {
+        var parts = displayName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+        if (parts.Length == 0)
+        {
+            return "?";
+        }
+
+        return parts.Length == 1
+            ? parts[0][..Math.Min(2, parts[0].Length)].ToUpperInvariant()
+            : $"{parts[0][0]}{parts[^1][0]}".ToUpperInvariant();
+    }
+
+    /// <summary>A deterministic HSL colour derived from the login, so the same person always gets the same avatar colour.</summary>
+    private static string AvatarColor(DeveloperLogin login)
+    {
+        var hue = ((StableHash(login.Value) % 360) + 360) % 360;
+        return $"hsl({hue.ToString(CultureInfo.InvariantCulture)}, 55%, 45%)";
+    }
+
+    /// <summary>
+    /// A simple, process-independent string hash (unlike <see cref="string.GetHashCode()"/>, which is
+    /// randomised per process), so the avatar hue is stable across app restarts and test runs.
+    /// </summary>
+    private static int StableHash(string value)
+    {
+        unchecked
+        {
+            var hash = 23;
+            foreach (var c in value)
+            {
+                hash = hash * 31 + c;
+            }
+
+            return hash;
+        }
+    }
+}

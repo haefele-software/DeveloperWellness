@@ -1,0 +1,539 @@
+/* ---------------------------------------------------------------------------------------------
+   Pulse Overview landing — rebuilt to the approved Claude design export 1:1 (Overview screen,
+   pulse-design-readable.html lines 653-953). Every colour, radius, shadow, spacing, and font size
+   below is copied verbatim from that export; only var(--accent) is a shell custom property
+   (explicitly permitted — the design itself references var(--accent,#0f6cbd) at the same two
+   spots: the recommendation "Open →" link and the development-trend sparkline stroke). This file
+   intentionally does not reuse the shell's shared .stat-tile/.share-bar/.team-card__bar classes
+   from wwwroot/app.css so the design's literal values live entirely in this scope; the shared
+   .skeleton-block/.inline-error/.retry-button/.stale-notice/.visually-hidden classes are kept
+   as-is for loading/stale/error states, which the design excerpt doesn't show a treatment for.
+   --------------------------------------------------------------------------------------------- */
+
+.ov-page {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 20px 24px 28px;
+}
+
+.overview-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+/* ---------- Headline row ---------- */
+
+.ov-headline-row {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+}
+
+.ov-h1 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+}
+
+.ov-roster-link {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent, #0f6cbd);
+    text-decoration: none;
+}
+
+.ov-roster-link:hover {
+    text-decoration: underline;
+}
+
+/* ---------- Shared card / section-header treatment ---------- */
+
+.ov-card {
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .04);
+}
+
+.ov-card--padded {
+    padding: 16px 18px;
+}
+
+.ov-projects-card,
+.ov-recs-card {
+    overflow: hidden;
+}
+
+.ov-card__header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 13px 18px;
+    border-bottom: 1px solid #ebebeb;
+}
+
+.ov-card__title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.ov-card__caption {
+    font-size: 12px;
+    color: #666;
+}
+
+/* ---------- KPI tile grid ---------- */
+
+.ov-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+}
+
+.ov-kpi-tile {
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .04);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+}
+
+.ov-kpi-tile__label {
+    font-size: 12px;
+    color: #616161;
+}
+
+.ov-kpi-tile__value-row {
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    margin-top: 7px;
+}
+
+.ov-kpi-tile__value {
+    font-size: 28px;
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: -.01em;
+    color: #242424;
+}
+
+.ov-kpi-tile__value--amber {
+    color: #8a3707;
+}
+
+.ov-kpi-tile__value--muted {
+    color: #767676;
+}
+
+.ov-kpi-tile__unit {
+    font-size: 12px;
+    color: #666;
+}
+
+.ov-kpi-tile__note {
+    font-size: 11.5px;
+    color: #666;
+    margin-top: 7px;
+}
+
+/* ---------- Projects table ---------- */
+
+.ov-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+
+.ov-table thead th {
+    padding: 9px 12px;
+    background: #fafafa;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: #616161;
+    text-align: left;
+    border-bottom: 1px solid #e0e0e0;
+}
+
+.ov-table thead th:first-child {
+    padding-left: 18px;
+}
+
+.ov-table thead th:last-child {
+    padding-right: 18px;
+}
+
+.ov-table tbody td {
+    padding: 8px 12px;
+    font-size: 13px;
+    border-bottom: 1px solid #f0f0f0;
+    color: #242424;
+}
+
+.ov-table tbody td:first-child {
+    padding-left: 18px;
+}
+
+.ov-table tbody td:last-child {
+    padding-right: 18px;
+}
+
+.ov-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.ov-table__num {
+    text-align: right;
+}
+
+.ov-table__row {
+    cursor: pointer;
+}
+
+.ov-table__row:hover {
+    background: #fafafa;
+}
+
+.ov-table__row:focus-visible {
+    outline: 2px solid var(--accent, #0f6cbd);
+    outline-offset: -2px;
+}
+
+.ov-table__name-cell {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-weight: 600;
+}
+
+.ov-folder-icon {
+    flex: none;
+}
+
+/* ---------- After-hours bar (projects table + team cards) ---------- */
+
+.ov-ah-cell {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ov-bar-track {
+    flex: 1;
+    height: 4px;
+    border-radius: 2px;
+    background: #f0f0f0;
+}
+
+.ov-bar-fill {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--accent, #0f6cbd);
+}
+
+.ov-bar-fill--amber {
+    background: #c48733;
+}
+
+.ov-ah-value {
+    font-size: 12px;
+    font-weight: 600;
+    width: 34px;
+    color: #242424;
+}
+
+.ov-ah-value--amber {
+    color: #8a3707;
+}
+
+.ov-signal {
+    font-size: 12px;
+    color: #767676;
+}
+
+.ov-signal--amber {
+    color: #8a3707;
+}
+
+/* ---------- Teams ---------- */
+
+.ov-teams-header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin: 0 0 10px;
+}
+
+.ov-team-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+}
+
+.ov-team-card {
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .04);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 11px;
+    cursor: pointer;
+}
+
+.ov-team-card:hover {
+    box-shadow: 0 2px 6px rgba(0, 0, 0, .09);
+}
+
+.ov-team-card:focus-visible {
+    outline: 2px solid var(--accent, #0f6cbd);
+    outline-offset: 2px;
+}
+
+.ov-team-card__head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.ov-team-card__name {
+    font-size: 13.5px;
+    font-weight: 600;
+}
+
+.ov-team-card__size {
+    font-size: 11.5px;
+    color: #666;
+}
+
+.ov-team-card__spark {
+    height: 26px;
+    display: block;
+}
+
+.ov-team-card__bars {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+
+.ov-team-bar__row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    margin-bottom: 3px;
+}
+
+.ov-team-bar__label {
+    color: #616161;
+}
+
+.ov-team-bar__val {
+    font-weight: 600;
+    color: #242424;
+}
+
+.ov-team-bar__val--amber {
+    color: #8a3707;
+}
+
+.ov-team-card__chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    min-height: 20px;
+}
+
+.ov-flag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 9px;
+    border-radius: 99px;
+    font-size: 11px;
+    font-weight: 600;
+    background: #fff9f0;
+    color: #8a3707;
+    border: 1px solid #f2d0a4;
+    cursor: pointer;
+    text-decoration: none;
+}
+
+.ov-flag-chip:hover {
+    filter: brightness(0.96);
+}
+
+/* ---------- Bottom grid: recommendations | trend + sentiment ---------- */
+
+.ov-bottom-grid {
+    display: grid;
+    grid-template-columns: 1.55fr 1fr;
+    gap: 14px;
+    align-items: start;
+}
+
+.ov-bottom-grid__side {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.ov-recs-empty {
+    padding: 20px 18px;
+    font-size: 13px;
+    color: #616161;
+    margin: 0;
+}
+
+.ov-recs-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.ov-recs-entry {
+    display: grid;
+    grid-template-columns: 200px 1fr auto;
+    gap: 12px;
+    align-items: center;
+    padding: 11px 18px;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.ov-recs-list li.ov-recs-entry:last-child {
+    border-bottom: none;
+}
+
+.ov-recs-entry:hover {
+    background: #fafafa;
+}
+
+.ov-recs-entry__who {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.overview-avatar {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    color: #fff;
+    font-weight: 600;
+    font-size: 10px;
+}
+
+.ov-recs-entry__name {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.ov-recs-entry__team {
+    margin: 0;
+    font-size: 11px;
+    color: #666;
+}
+
+.ov-recs-entry__action {
+    margin: 0;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: #8a3707;
+}
+
+.ov-recs-entry__reason {
+    margin: 0;
+    margin-top: 2px;
+    font-size: 12px;
+    color: #616161;
+    line-height: 1.45;
+}
+
+.ov-recs-entry__link {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--accent, #0f6cbd);
+    text-decoration: none;
+}
+
+.ov-recs-entry__link:hover {
+    text-decoration: underline;
+}
+
+/* ---------- Development trend ---------- */
+
+.ov-trend-spark {
+    width: 100%;
+    height: 44px;
+    display: block;
+    margin-top: 12px;
+}
+
+.ov-trend-statement {
+    margin: 0;
+    margin-top: 10px;
+    font-size: 12.5px;
+    color: #424242;
+    line-height: 1.5;
+}
+
+.ov-trend-note {
+    margin: 0;
+    margin-top: 4px;
+    font-size: 11px;
+    color: #666;
+}
+
+/* ---------- Review sentiment ---------- */
+
+.ov-sentiment-bar {
+    display: flex;
+    height: 16px;
+    border-radius: 3px;
+    overflow: hidden;
+    background: #f0f0f0;
+    margin-top: 12px;
+}
+
+.ov-sentiment-bar__seg--positive {
+    background: #9fd89f;
+}
+
+.ov-sentiment-bar__seg--neutral {
+    background: #d1d1d1;
+}
+
+.ov-sentiment-bar__seg--negative {
+    background: #e8a33d;
+}
+
+.ov-sentiment-caption {
+    margin: 0;
+    margin-top: 9px;
+    font-size: 12px;
+    color: #616161;
+    line-height: 1.5;
+}
+
+.ov-sentiment-unavailable {
+    margin: 0;
+    margin-top: 10px;
+    font-size: 12.5px;
+    color: #616161;
+    line-height: 1.5;
+}

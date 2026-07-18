@@ -1,0 +1,158 @@
+@*
+    On-request AI summary panel (contracts/ui-design.md 4.4/4.5; FR-015..FR-017, FR-021), shared by
+    ProjectDetail and DeveloperDetail. Nothing runs until the user asks (design principle: "Never blocked,
+    never blank" applies to the rest of the page, not to this panel starting a request on its own).
+    Bypasses the idle "Generate summary" button entirely when the AI service is unconfigured — there is no
+    point offering a button that can only ever come back unavailable (FR-014's "quiet local unavailable
+    state"). Resets to idle on any scope or period change so a summary for the old key never lingers
+    (FR-021 change semantics) even if a request for the old key is still in flight.
+*@
+@implements IDisposable
+@inject AiSummaryService AiSummaryService
+@inject DashboardState State
+
+<section class="ai-summary-panel" aria-labelledby="ai-summary-heading">
+    <div class="ai-summary-panel__title-row">
+        <h2 id="ai-summary-heading" class="ai-summary-panel__heading">@HeadingText</h2>
+        <span class="ai-summary-panel__badge">AI</span>
+    </div>
+
+    @if (!IsAvailable)
+    {
+        <p class="ai-summary-panel__note">Summaries are not configured for this workspace.</p>
+    }
+    else if (_phase == Phase.Idle)
+    {
+        <p class="ai-summary-panel__prompt">@IdleText</p>
+        <button type="button" class="ai-summary-panel__button" @onclick="() => GenerateAsync(refresh: false)">Generate summary</button>
+    }
+    else if (_phase == Phase.Loading)
+    {
+        <div class="ai-summary-panel__skeleton" aria-hidden="true">
+            <div class="ai-summary-panel__skeleton-line ai-summary-panel__skeleton-line--full"></div>
+            <div class="ai-summary-panel__skeleton-line ai-summary-panel__skeleton-line--wide"></div>
+            <div class="ai-summary-panel__skeleton-line ai-summary-panel__skeleton-line--narrow"></div>
+        </div>
+        <span class="ai-summary-panel__loading-text" aria-live="polite" aria-busy="true">Summarising… usually under 10 seconds.</span>
+    }
+    else if (_phase == Phase.Ready)
+    {
+        <p class="ai-summary-panel__text">@_summary!.Text</p>
+        <div class="ai-summary-panel__footer">
+            <span class="ai-summary-panel__label">@AiLabel</span>
+            <button type="button" class="ai-summary-panel__button ai-summary-panel__button--secondary" @onclick="() => GenerateAsync(refresh: true)">Refresh</button>
+        </div>
+    }
+    else if (_phase == Phase.NoActivity)
+    {
+        <p class="ai-summary-panel__note">@SubjectDisplayName recorded no activity in this period, so there's nothing to summarise.</p>
+    }
+    else
+    {
+        <p class="ai-summary-panel__note">@DownText</p>
+    }
+</section>
+
+@code {
+    private enum Phase
+    {
+        Idle,
+        Loading,
+        Ready,
+        NoActivity,
+        Failed,
+    }
+
+    private readonly CancellationTokenSource _cts = new();
+
+    private Phase _phase = Phase.Idle;
+    private AiSummary? _summary;
+    private (ScopeKey Scope, int PeriodDays) _lastKey;
+
+    /// <summary>The project or developer this panel summarises.</summary>
+    [Parameter, EditorRequired]
+    public required AiSubject Subject { get; set; }
+
+    /// <summary>The subject's display name, used in the idle prompt and the no-activity note.</summary>
+    [Parameter, EditorRequired]
+    public required string SubjectDisplayName { get; set; }
+
+    private bool IsAvailable => AiSummaryService.IsAvailable;
+
+    /// <summary>"AI summary" for a developer, "AI project summary" for a project (ui-design.md 4.4/4.5).</summary>
+    private string HeadingText => Subject.Kind == AiSubjectKind.Project ? "AI project summary" : "AI summary";
+
+    /// <summary>The idle prompt's exact design copy per subject kind (ui-design.md 4.4/4.5), with the dynamic name bound for the developer variant.</summary>
+    private string IdleText => Subject.Kind == AiSubjectKind.Project
+        ? "Generate a short summary of this project's activity and climate. Nothing runs until you ask."
+        : $"Generate a short, supportive summary of {SubjectDisplayName}'s period. Nothing runs until you ask.";
+
+    /// <summary>The service-down note's exact design copy per subject kind (ui-design.md 4.4/4.5).</summary>
+    private string DownText => Subject.Kind == AiSubjectKind.Project
+        ? "The summary service isn't reachable right now. Everything else on this page is live — try again in a little while."
+        : "The summary service isn't reachable right now. Everything else on this page is live — try the summary again in a little while.";
+
+    private string AiLabel => _summary is { } summary
+        ? $"AI-generated · {(summary.Scope.Kind == ScopeKind.Organisation ? "organisation" : summary.Scope.ProjectName)} · last {summary.Period.Days} days"
+        : string.Empty;
+
+    /// <inheritdoc />
+    protected override void OnInitialized()
+    {
+        _lastKey = (State.Scope, State.PeriodDays);
+        State.Changed += OnStateChanged;
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        State.Changed -= OnStateChanged;
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+
+    private void OnStateChanged()
+    {
+        var currentKey = (State.Scope, State.PeriodDays);
+
+        if (!currentKey.Equals(_lastKey))
+        {
+            _lastKey = currentKey;
+            _phase = Phase.Idle;
+            _summary = null;
+        }
+
+        InvokeAsync(StateHasChanged);
+    }
+
+    private async Task GenerateAsync(bool refresh)
+    {
+        var requestKey = _lastKey;
+        _phase = Phase.Loading;
+        StateHasChanged();
+
+        AiSummaryResult result;
+        try
+        {
+            result = await AiSummaryService.GetSummaryAsync(Subject, requestKey.Scope, requestKey.PeriodDays, refresh, _cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return; // disposed, or navigated away, while the request was in flight
+        }
+
+        if (!requestKey.Equals(_lastKey))
+        {
+            return; // scope/period changed mid-flight; OnStateChanged already reset the panel to idle
+        }
+
+        _summary = result.Summary;
+        _phase = result.State switch
+        {
+            AiSummaryState.Ready => Phase.Ready,
+            AiSummaryState.NoActivity => Phase.NoActivity,
+            _ => Phase.Failed,
+        };
+        StateHasChanged();
+    }
+}

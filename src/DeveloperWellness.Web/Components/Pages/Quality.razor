@@ -1,0 +1,247 @@
+@page "/quality"
+@using System.Globalization
+@implements IDisposable
+@inject DashboardState State
+@inject QualityQuantityService QualityQuantityService
+@inject IOptions<WellnessOptions> WellnessOptionsAccessor
+
+<PageTitle>Pulse — Quality vs quantity</PageTitle>
+
+<div class="quality-page">
+    <div class="quality-head">
+        <h1 class="quality-headline">Quality vs quantity</h1>
+        <p class="quality-subhead">Volume beside rework proxies — no score, no index, no ranking. Shown only for people with at least 3 PRs this period.</p>
+    </div>
+
+    @if (_lastResult is null)
+    {
+        <div class="quality-card">
+            <table class="team-table" aria-busy="true">
+                <caption class="visually-hidden">Loading quality vs quantity</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Developer</th>
+                        <th scope="col">Commits</th>
+                        <th scope="col">PRs opened</th>
+                        <th scope="col">Changes-requested share</th>
+                        <th scope="col">Avg review rounds</th>
+                        <th scope="col">Signal</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @for (var i = 0; i < 5; i++)
+                    {
+                        <tr class="skeleton-row">
+                            <td colspan="6">&nbsp;</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+    else if (_lastResult.Source.Snapshot is null || _lastResult.Rows is null)
+    {
+        <div class="inline-error" role="alert">
+            <p>@_lastResult.Source.ErrorMessage</p>
+            <button type="button" class="retry-button" @onclick="OnRetryClicked">Try again</button>
+        </div>
+    }
+    else
+    {
+        var snapshot = _lastResult.Source.Snapshot;
+        var rows = _lastResult.Rows;
+
+        // Every row already implies at least one authored event (RushingCalculator only reports authors who
+        // authored at least one commit, review, comment, or PR open), so the below-sample group here is exactly
+        // "has some activity but fewer than 3 PRs this period" with no extra activity filter needed.
+        var sufficientRows = rows
+            .Where(row => row.Snapshot.SufficientSample)
+            .OrderBy(row => row.Developer.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var belowSampleNames = rows
+            .Where(row => !row.Snapshot.SufficientSample)
+            .OrderBy(row => row.Developer.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .Select(row => row.Developer.DisplayName)
+            .ToList();
+
+        @if (_lastResult.Source.Kind != DashboardErrorKind.None)
+        {
+            <p class="stale-notice" role="status">
+                Showing data loaded @snapshot.LoadedAt.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture) — the latest refresh did not succeed: @_lastResult.Source.ErrorMessage
+            </p>
+        }
+
+        <div class="quality-card">
+            <table class="team-table">
+                <colgroup>
+                    <col style="width:190px" />
+                    <col style="width:90px" />
+                    <col style="width:90px" />
+                    <col style="width:170px" />
+                    <col style="width:150px" />
+                    <col />
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th scope="col">Developer</th>
+                        <th scope="col">Commits</th>
+                        <th scope="col">PRs opened</th>
+                        <th scope="col">Changes-requested share</th>
+                        <th scope="col">Avg review rounds</th>
+                        <th scope="col">Signal</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in sufficientRows)
+                    {
+                        <tr>
+                            <td>
+                                <span class="quality-dev-cell">
+                                    <span class="quality-avatar" style="background-color:@AvatarColor(row.Developer.Login)" aria-hidden="true">@Initials(row.Developer.DisplayName)</span>
+                                    <a href="@DeveloperDetailUrl(row.Developer.Login)">@row.Developer.DisplayName</a>
+                                </span>
+                            </td>
+                            <td>@row.Snapshot.Commits</td>
+                            <td>@row.Snapshot.PrsOpened</td>
+                            <td class="@(IsChangesRequestedHigh(row.Snapshot.ChangesRequestedShare) ? "quality-share quality-share--high" : "quality-share")">
+                                @FormatShare(row.Snapshot.ChangesRequestedShare)
+                            </td>
+                            <td>@FormatRounds(row.Snapshot.AvgReviewRounds)</td>
+                            <td>
+                                @if (row.Flag is { } flag)
+                                {
+                                    <FlagChip Flag="flag" />
+                                }
+                                else
+                                {
+                                    <span class="signals-steady">Volume and rework look in step</span>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+
+            @if (belowSampleNames.Count > 0)
+            {
+                <p class="quality-below-sample">
+                    <strong>Not enough review data to say anything useful:</strong> @FormatNames(belowSampleNames) — fewer than 3 PRs this period, which is perfectly normal.
+                </p>
+            }
+        </div>
+
+        <footer class="team-overview-footer">
+            <p>Possible rushing means above-median output alongside a high changes-requested share — it reads as pace pressure, never carelessness.</p>
+        </footer>
+    }
+</div>
+
+@code {
+    private readonly CancellationTokenSource _cts = new();
+
+    private QualityQuantityResult? _lastResult;
+    private (ScopeKey Scope, int PeriodDays)? _loadedKey;
+
+    /// <inheritdoc />
+    protected override async Task OnInitializedAsync()
+    {
+        State.Changed += OnStateChanged;
+        await LoadAsync();
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        State.Changed -= OnStateChanged;
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+
+    private void OnStateChanged()
+    {
+        var currentKey = (State.Scope, State.PeriodDays);
+
+        if (_loadedKey is null || !_loadedKey.Value.Equals(currentKey))
+        {
+            _ = InvokeAsync(LoadAsync);
+        }
+        else
+        {
+            InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        var scope = State.Scope;
+        var periodDays = State.PeriodDays;
+        _loadedKey = (scope, periodDays);
+
+        var result = await QualityQuantityService.GetAsync(scope, periodDays, _cts.Token);
+
+        _lastResult = result;
+        State.Apply(result.Source);
+        StateHasChanged();
+    }
+
+    private async Task OnRetryClicked() => await LoadAsync();
+
+    private static string DeveloperDetailUrl(DeveloperLogin login) => $"/developer/{Uri.EscapeDataString(login.Value)}";
+
+    private static string FormatShare(decimal? share) =>
+        share is { } value ? $"{Math.Round(value * 100m, MidpointRounding.AwayFromZero):0}%" : "—";
+
+    private static string FormatRounds(decimal? rounds) =>
+        rounds is { } value ? value.ToString("0.0", CultureInfo.InvariantCulture) : "—";
+
+    private bool IsChangesRequestedHigh(decimal? share) =>
+        share is { } value && value > WellnessOptionsAccessor.Value.ChangesRequestedThreshold;
+
+    /// <summary>Joins below-sample display names naturally (mirrors the check-in roster's frustration-paragraph name joiner): one name alone, two joined by "and", three or more comma-separated with a final "and".</summary>
+    private static string FormatNames(IReadOnlyList<string> names) => names.Count switch
+    {
+        1 => names[0],
+        2 => $"{names[0]} and {names[1]}",
+        _ => $"{string.Join(", ", names.Take(names.Count - 1))}, and {names[^1]}",
+    };
+
+    /// <summary>Up to two initials from a display name (first plus last word), for the avatar circle.</summary>
+    private static string Initials(string displayName)
+    {
+        var parts = displayName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+        if (parts.Length == 0)
+        {
+            return "?";
+        }
+
+        return parts.Length == 1
+            ? parts[0][..Math.Min(2, parts[0].Length)].ToUpperInvariant()
+            : $"{parts[0][0]}{parts[^1][0]}".ToUpperInvariant();
+    }
+
+    /// <summary>A deterministic HSL colour derived from the login, so the same person always gets the same avatar colour.</summary>
+    private static string AvatarColor(DeveloperLogin login)
+    {
+        var hue = ((StableHash(login.Value) % 360) + 360) % 360;
+        return $"hsl({hue.ToString(CultureInfo.InvariantCulture)}, 55%, 45%)";
+    }
+
+    /// <summary>
+    /// A simple, process-independent string hash (unlike <see cref="string.GetHashCode()"/>, which is
+    /// randomised per process), so the avatar hue is stable across app restarts and test runs.
+    /// </summary>
+    private static int StableHash(string value)
+    {
+        unchecked
+        {
+            var hash = 23;
+            foreach (var c in value)
+            {
+                hash = hash * 31 + c;
+            }
+
+            return hash;
+        }
+    }
+}
