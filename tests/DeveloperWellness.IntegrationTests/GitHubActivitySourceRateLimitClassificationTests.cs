@@ -30,11 +30,11 @@ public class GitHubActivitySourceRateLimitClassificationTests
     [InlineData("Must have admin rights to Repository.")]
     [InlineData("Resource not accessible by integration")]
     [InlineData("")]
-    public void ClassifyForbidden_MessageDoesNotMentionRateLimit_ReturnsCredentialsMissing(string message)
+    public void ClassifyForbidden_MessageDoesNotMentionRateLimit_ReturnsCredentialsRejected(string message)
     {
         var kind = GitHubActivitySource.ClassifyForbidden(message);
 
-        Assert.Equal(ActivitySourceFailureKind.CredentialsMissing, kind);
+        Assert.Equal(ActivitySourceFailureKind.CredentialsRejected, kind);
     }
 
     [Fact]

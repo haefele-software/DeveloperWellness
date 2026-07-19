@@ -17,6 +17,9 @@ public enum ConnectionState
     /// <summary>Live mode is on but GitHub:Organisation or GitHub:Token is missing from configuration.</summary>
     CredentialsMissing,
 
+    /// <summary>Live mode is on and credentials are configured, but GitHub refused them.</summary>
+    CredentialsRejected,
+
     /// <summary>GitHub is reachable but currently rate-limited; the previously loaded dataset stays visible.</summary>
     RateLimited,
 }

@@ -568,6 +568,7 @@ public sealed class DashboardQueryService(IActivitySource activitySource, IMemor
     private static DashboardErrorKind MapErrorKind(ActivitySourceFailureKind kind) => kind switch
     {
         ActivitySourceFailureKind.CredentialsMissing => DashboardErrorKind.CredentialsMissing,
+        ActivitySourceFailureKind.CredentialsRejected => DashboardErrorKind.CredentialsRejected,
         ActivitySourceFailureKind.RateLimited => DashboardErrorKind.RateLimited,
         _ => DashboardErrorKind.Unavailable,
     };

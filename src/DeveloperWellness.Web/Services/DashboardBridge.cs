@@ -12,10 +12,11 @@ public static class DashboardBridge
 {
     /// <summary>
     /// Applies <paramref name="result"/> to <paramref name="state"/>. A fresh load reports
-    /// <see cref="ConnectionState.Connected"/>; credentials-missing and rate-limited failures map onto
-    /// their matching shell states. Any other failure kind (a non-rate-limit connectivity error) leaves
-    /// the shell's connection state untouched — there is no dedicated shell surface for it yet, so the
-    /// calling page renders its own inline notice instead of overloading the rate-limit banner's wording.
+    /// <see cref="ConnectionState.Connected"/>; credentials-missing, credentials-rejected, and
+    /// rate-limited failures map onto their matching shell states. Any other failure kind (a
+    /// non-rate-limit connectivity error) leaves the shell's connection state untouched — there is no
+    /// dedicated shell surface for it yet, so the calling page renders its own inline notice instead of
+    /// overloading the rate-limit banner's wording.
     /// </summary>
     public static void Apply(this DashboardState state, DashboardResult result)
     {
@@ -34,6 +35,9 @@ public static class DashboardBridge
                 break;
             case DashboardErrorKind.CredentialsMissing:
                 state.SetConnection(ConnectionState.CredentialsMissing);
+                break;
+            case DashboardErrorKind.CredentialsRejected:
+                state.SetConnection(ConnectionState.CredentialsRejected);
                 break;
             case DashboardErrorKind.RateLimited:
                 state.SetConnection(ConnectionState.RateLimited, result.RetryAt);

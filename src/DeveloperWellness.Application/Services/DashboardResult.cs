@@ -6,8 +6,11 @@ public enum DashboardErrorKind
     /// <summary>The fetch succeeded; <see cref="DashboardResult.Snapshot"/> is fresh.</summary>
     None,
 
-    /// <summary>Live mode is on but the required GitHub credentials are missing or invalid.</summary>
+    /// <summary>Live mode is on but the required GitHub credentials are missing from configuration.</summary>
     CredentialsMissing,
+
+    /// <summary>Credentials are configured but GitHub refused them (invalid, expired, revoked, or missing a required scope).</summary>
+    CredentialsRejected,
 
     /// <summary>GitHub is reachable but the request was rejected due to rate limiting.</summary>
     RateLimited,

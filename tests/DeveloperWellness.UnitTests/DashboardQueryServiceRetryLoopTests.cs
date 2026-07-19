@@ -42,6 +42,9 @@ public class DashboardQueryServiceRetryLoopTests
     private static ActivitySourceException CredentialsMissing() =>
         new("Credentials missing.", innerException: null, ActivitySourceFailureKind.CredentialsMissing);
 
+    private static ActivitySourceException CredentialsRejected() =>
+        new("Credentials rejected.", innerException: null, ActivitySourceFailureKind.CredentialsRejected);
+
     [Fact]
     public async Task TriggerRetryForTestAsync_AfterRateLimitedFailureThenSuccess_UpdatesLatestAndRaisesStateChangedOnce()
     {
@@ -170,6 +173,30 @@ public class DashboardQueryServiceRetryLoopTests
         Assert.Equal(DashboardErrorKind.CredentialsMissing, service.Latest!.Kind);
 
         // A non-rate-limited failure kind stops the retry loop by design (a timer cannot fix a missing
+        // credential): a further retry attempt must not reach the activity source.
+        await service.TriggerRetryForTestAsync();
+        Assert.Equal(2, source.CallCount);
+        Assert.Equal(1, raisedCount);
+    }
+
+    [Fact]
+    public async Task TriggerRetryForTestAsync_RetryReturnsCredentialsRejectedFailureKind_UpdatesLatestRaisesStateChangedAndStopsRetrying()
+    {
+        var source = new ScriptedActivitySource();
+        source.EnqueueFailure(RateLimited(DateTimeOffset.UtcNow.AddSeconds(60)));
+        source.EnqueueFailure(CredentialsRejected());
+
+        var service = CreateService(source);
+        var raisedCount = 0;
+        service.StateChanged += () => raisedCount++;
+
+        await service.GetAsync(OrgScope, 14, CancellationToken.None);
+        await service.TriggerRetryForTestAsync();
+
+        Assert.Equal(1, raisedCount);
+        Assert.Equal(DashboardErrorKind.CredentialsRejected, service.Latest!.Kind);
+
+        // A non-rate-limited failure kind stops the retry loop by design (a timer cannot fix a rejected
         // credential): a further retry attempt must not reach the activity source.
         await service.TriggerRetryForTestAsync();
         Assert.Equal(2, source.CallCount);

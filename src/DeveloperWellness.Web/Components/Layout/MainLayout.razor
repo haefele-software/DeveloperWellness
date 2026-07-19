@@ -167,7 +167,7 @@
             </div>
         }
 
-        @if (State.Connection == ConnectionState.CredentialsMissing)
+        @if (State.Connection is ConnectionState.CredentialsMissing or ConnectionState.CredentialsRejected)
         {
             <div class="credentials-screen">
                 <div class="credentials-card">
@@ -176,9 +176,21 @@
                             <path d="M12 1C5.9 1 1 5.9 1 12c0 4.9 3.1 9 7.5 10.4.5.1.7-.2.7-.5v-1.9c-3 .7-3.7-1.3-3.7-1.3-.5-1.3-1.2-1.6-1.2-1.6-1-.7.1-.7.1-.7 1.1.1 1.7 1.1 1.7 1.1 1 1.7 2.6 1.2 3.2.9.1-.7.4-1.2.7-1.5-2.4-.3-5-1.2-5-5.5 0-1.2.4-2.2 1.1-3-.1-.3-.5-1.4.1-2.9 0 0 .9-.3 3 1.1a10.4 10.4 0 0 1 5.5 0c2.1-1.4 3-1.1 3-1.1.6 1.5.2 2.6.1 2.9.7.8 1.1 1.8 1.1 3 0 4.3-2.6 5.2-5.1 5.5.4.3.8 1 .8 2v3c0 .3.2.6.7.5C19.9 21 23 16.9 23 12c0-6.1-4.9-11-11-11z" />
                         </svg>
                     </div>
-                    <h1 class="credentials-card__title">Connect Pulse to GitHub</h1>
-                    <p class="credentials-card__body">No GitHub credentials are configured, so there's nothing to show yet. Add a fine-grained personal access token with <strong>read-only</strong> access to your organisation's repositories:</p>
+                    @if (State.Connection == ConnectionState.CredentialsRejected)
+                    {
+                        <h1 class="credentials-card__title">GitHub rejected Pulse's token</h1>
+                        <p class="credentials-card__body">Pulse has a GitHub token configured, but GitHub refused it. This is most commonly an expired fine-grained personal access token; it can also mean the token was revoked or is missing a required scope. Update the secret with a fresh token:</p>
+                    }
+                    else
+                    {
+                        <h1 class="credentials-card__title">Connect Pulse to GitHub</h1>
+                        <p class="credentials-card__body">No GitHub credentials are configured, so there's nothing to show yet. Add a fine-grained personal access token with <strong>read-only</strong> access to your organisation's repositories:</p>
+                    }
                     <div class="credentials-card__snippet">dotnet user-secrets set "GitHub:Token" "&lt;your token&gt;"</div>
+                    @if (State.Connection == ConnectionState.CredentialsRejected)
+                    {
+                        <p class="credentials-card__note">Restart the app after saving the new token. GitHub credentials are only read at start-up, so Re-check connection below cannot see a changed secret until Pulse restarts.</p>
+                    }
                     <p class="credentials-card__note">Pulse reads commits, pull requests, reviews and comments. It never writes to GitHub, and individual signals are only visible to team leads.</p>
                     <button type="button" class="credentials-card__cta" @onclick="OnRecheckClicked">Re-check connection</button>
                 </div>
@@ -372,11 +384,19 @@
 
     private void OnAlertPillClicked() => Navigation.NavigateTo("/checkins");
 
+    /// <summary>
+    /// The status dot's CSS modifier. <see cref="ConnectionState.CredentialsRejected"/> reuses the
+    /// <c>credentials-missing</c> visual treatment (see <c>app.css</c>'s shared selector for both) rather
+    /// than getting its own colour: both states mean the same thing to the dot, "live mode needs attention
+    /// before data can load", and only the copy in <see cref="ConnectionText"/> and the credentials screen
+    /// needs to distinguish missing from rejected.
+    /// </summary>
     private string ConnectionModifier => State.Connection switch
     {
         ConnectionState.Connected => "connected",
         ConnectionState.RateLimited => "rate-limited",
         ConnectionState.CredentialsMissing => "credentials-missing",
+        ConnectionState.CredentialsRejected => "credentials-missing",
         _ => "unknown",
     };
 
@@ -385,6 +405,7 @@
         ConnectionState.Connected => "SignalR connected",
         ConnectionState.RateLimited => "GitHub paused (rate limit)",
         ConnectionState.CredentialsMissing => "Not connected",
+        ConnectionState.CredentialsRejected => "GitHub token rejected",
         _ => "Unknown",
     };
 

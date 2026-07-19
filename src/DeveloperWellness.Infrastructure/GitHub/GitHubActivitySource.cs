@@ -284,19 +284,19 @@ public sealed class GitHubActivitySource(
         }
         catch (Octokit.AuthorizationException ex)
         {
-            logger.LogWarning(ex, "GitHub rejected Pulse's credentials outright. Kind={Kind}.", ActivitySourceFailureKind.CredentialsMissing);
+            logger.LogWarning(ex, "GitHub rejected Pulse's credentials outright. Kind={Kind}.", ActivitySourceFailureKind.CredentialsRejected);
 
             throw new ActivitySourceException(
-                "GitHub rejected Pulse's credentials. Check GitHub:Token in configuration, then re-check.",
+                "GitHub rejected Pulse's credentials. A fine-grained personal access token may have expired, been revoked, or lost a required scope; update GitHub:Token, then restart the app before re-checking, since secrets are only read at start-up.",
                 ex,
-                ActivitySourceFailureKind.CredentialsMissing);
+                ActivitySourceFailureKind.CredentialsRejected);
         }
         catch (Octokit.ForbiddenException ex)
         {
             // Bug fix (rate-limit hardening): Octokit maps some account-level throttles to a bare
             // ForbiddenException whose message still reads "rate limit exceeded" rather than to one of its
             // own typed rate-limit exceptions above. Without this check that response fell into this same
-            // catch block's original credentials-missing branch below — the wrong message, since it told
+            // catch block's original credentials-rejected branch below — the wrong message, since it told
             // the user to check their token when the real problem was throttling.
             var kind = ClassifyForbidden(ex.Message);
             if (kind == ActivitySourceFailureKind.RateLimited)
@@ -318,7 +318,7 @@ public sealed class GitHubActivitySource(
             throw new ActivitySourceException(
                 "GitHub rejected Pulse's credentials, or the token is missing a required permission. Check GitHub:Token, then re-check.",
                 ex,
-                ActivitySourceFailureKind.CredentialsMissing);
+                kind);
         }
         catch (Octokit.ApiException ex)
         {
@@ -338,14 +338,19 @@ public sealed class GitHubActivitySource(
 
     /// <summary>
     /// Classifies a <see cref="Octokit.ForbiddenException"/> by message content (rate-limit hardening, bug
-    /// fix). Any mention of "rate limit" maps to <see cref="ActivitySourceFailureKind.RateLimited"/> instead
-    /// of the credentials-missing kind this exception type otherwise carries; everything else (a genuinely
-    /// forbidden token or a missing permission scope) keeps the original behaviour.
+    /// fix). Any mention of "rate limit" maps to <see cref="ActivitySourceFailureKind.RateLimited"/>;
+    /// everything else (a genuinely forbidden token or a missing permission scope) maps to
+    /// <see cref="ActivitySourceFailureKind.CredentialsRejected"/> rather than
+    /// <see cref="ActivitySourceFailureKind.CredentialsMissing"/> (credentials-rejected vs. missing
+    /// distinction), because a <see cref="Octokit.ForbiddenException"/> only ever occurs when a token was
+    /// actually presented to GitHub and rejected; <see cref="ActivitySourceFailureKind.CredentialsMissing"/>
+    /// is reserved for the call-time presence check in <see cref="GetActivityAsync"/>, which runs before any
+    /// request reaches GitHub at all.
     /// </summary>
     internal static ActivitySourceFailureKind ClassifyForbidden(string message) =>
         message.Contains("rate limit", StringComparison.OrdinalIgnoreCase)
             ? ActivitySourceFailureKind.RateLimited
-            : ActivitySourceFailureKind.CredentialsMissing;
+            : ActivitySourceFailureKind.CredentialsRejected;
 
     /// <summary>
     /// Picks which of the two rate-limit messages to surface for a <see cref="ActivitySourceFailureKind.RateLimited"/>
