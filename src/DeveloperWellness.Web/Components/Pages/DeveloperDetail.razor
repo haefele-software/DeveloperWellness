@@ -47,7 +47,7 @@ else
         .GetValueOrDefault(summary.Developer.Login)?.Snapshot;
 
     <header class="developer-detail-header">
-        <div class="developer-detail-header__avatar" style="background-color:@AvatarColor(summary.Developer.Login)" aria-hidden="true">@Initials(summary.Developer.DisplayName)</div>
+        <div class="developer-detail-header__avatar" style="background-color:@DisplayFormat.AvatarColor(summary.Developer.Login)" aria-hidden="true">@DisplayFormat.Initials(summary.Developer.DisplayName)</div>
         <div class="developer-detail-header__identity">
             <h1>@summary.Developer.DisplayName</h1>
             <p class="developer-detail-subhead">@BuildSubhead(summary, snapshot)</p>
@@ -154,7 +154,7 @@ else
             <section class="share-bar-block share-bar-block--divided" aria-labelledby="ooh-share-heading">
                 <div class="share-bar-block__row">
                     <h2 id="ooh-share-heading" class="share-bar-block__title">Out-of-hours commit share</h2>
-                    <span class="share-bar-block__value" style="color:@(IsAboveThreshold(summary.OutOfHoursCommitShare, options) ? "#8a3707" : "#242424")">@FormatShare(summary.OutOfHoursCommitShare)</span>
+                    <span class="share-bar-block__value" style="color:@(IsAboveThreshold(summary.OutOfHoursCommitShare, options) ? "#8a3707" : "#242424")">@DisplayFormat.FormatShare(summary.OutOfHoursCommitShare)</span>
                 </div>
                 <div class="share-bar-block__track" role="img" aria-label="@ShareBarAriaLabel(summary.OutOfHoursCommitShare, options)">
                     <div class="@("share-bar-block__fill " + (IsAboveThreshold(summary.OutOfHoursCommitShare, options) ? "share-bar-block__fill--amber" : "share-bar-block__fill--accent"))"
@@ -167,7 +167,7 @@ else
             <section class="share-bar-block" aria-labelledby="ooh-pr-share-heading">
                 <div class="share-bar-block__row">
                     <h2 id="ooh-pr-share-heading" class="share-bar-block__title">Out-of-hours PR activity share</h2>
-                    <span class="share-bar-block__value" style="color:@(IsAboveThreshold(prAfterHoursResult?.Share, options) ? "#8a3707" : "#242424")">@FormatShare(prAfterHoursResult?.Share)</span>
+                    <span class="share-bar-block__value" style="color:@(IsAboveThreshold(prAfterHoursResult?.Share, options) ? "#8a3707" : "#242424")">@DisplayFormat.FormatShare(prAfterHoursResult?.Share)</span>
                 </div>
                 <div class="share-bar-block__track" role="img" aria-label="@PrShareBarAriaLabel(prAfterHoursResult, options)">
                     <div class="@("share-bar-block__fill " + (IsAboveThreshold(prAfterHoursResult?.Share, options) ? "share-bar-block__fill--amber" : "share-bar-block__fill--accent"))"
@@ -263,45 +263,40 @@ else
         }
     }
 
-    private async Task LoadAsync()
+    private Task LoadAsync() => LoadCoreAsync(ct => QueryService.GetAsync(State.Scope, State.PeriodDays, ct));
+
+    private Task OnRetryClicked() => LoadCoreAsync(ct => QueryService.RefreshAsync(State.Scope, State.PeriodDays, ct));
+
+    /// <summary>
+    /// The single fetch-and-apply path shared by <see cref="LoadAsync"/> and <see cref="OnRetryClicked"/>
+    /// (they differ only in which <see cref="DashboardQueryService"/> method <paramref name="fetch"/>
+    /// calls). Stale-load race guard (see Overview.razor's <c>LoadCoreAsync</c> for the full rationale):
+    /// drops the result, and leaves the shared loading indicator alone, when a newer load for a different
+    /// key started while this one was still in flight.
+    /// </summary>
+    private async Task LoadCoreAsync(Func<CancellationToken, Task<DashboardResult>> fetch)
     {
-        var scope = State.Scope;
-        var periodDays = State.PeriodDays;
-        _loadedKey = (scope, periodDays, State.DataVersion);
+        var requestKey = (State.Scope, State.PeriodDays, State.DataVersion);
+        _loadedKey = requestKey;
         _lastResult = null;
         State.SetLoading(true);
 
         DashboardResult result;
         try
         {
-            result = await QueryService.GetAsync(scope, periodDays, _cts.Token);
+            result = await fetch(_cts.Token);
         }
         finally
         {
-            State.SetLoading(false);
+            if (_loadedKey is { } currentKey && currentKey.Equals(requestKey))
+            {
+                State.SetLoading(false);
+            }
         }
 
-        _lastResult = result;
-        State.Apply(result);
-        StateHasChanged();
-    }
-
-    private async Task OnRetryClicked()
-    {
-        var scope = State.Scope;
-        var periodDays = State.PeriodDays;
-        _loadedKey = (scope, periodDays, State.DataVersion);
-        _lastResult = null;
-        State.SetLoading(true);
-
-        DashboardResult result;
-        try
+        if (_loadedKey is not { } latestKey || !latestKey.Equals(requestKey))
         {
-            result = await QueryService.RefreshAsync(scope, periodDays, _cts.Token);
-        }
-        finally
-        {
-            State.SetLoading(false);
+            return;
         }
 
         _lastResult = result;
@@ -335,46 +330,6 @@ else
 
     private static string FindTeamName(DeveloperLogin login, IReadOnlyList<Team> teams) =>
         teams.FirstOrDefault(t => t.Members.Contains(login))?.Name ?? "No team";
-
-    /// <summary>Up to two initials from a display name (first plus last word), for the header avatar circle.</summary>
-    private static string Initials(string displayName)
-    {
-        var parts = displayName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-
-        if (parts.Length == 0)
-        {
-            return "?";
-        }
-
-        return parts.Length == 1
-            ? parts[0][..Math.Min(2, parts[0].Length)].ToUpperInvariant()
-            : $"{parts[0][0]}{parts[^1][0]}".ToUpperInvariant();
-    }
-
-    /// <summary>A deterministic HSL colour derived from the login, so the same person always gets the same avatar colour (matches CheckIns.razor's roster avatars).</summary>
-    private static string AvatarColor(DeveloperLogin login)
-    {
-        var hue = ((StableHash(login.Value) % 360) + 360) % 360;
-        return $"hsl({hue.ToString(CultureInfo.InvariantCulture)}, 55%, 45%)";
-    }
-
-    /// <summary>
-    /// A simple, process-independent string hash (unlike <see cref="string.GetHashCode()"/>, which is
-    /// randomised per process), so the avatar hue is stable across app restarts and test runs.
-    /// </summary>
-    private static int StableHash(string value)
-    {
-        unchecked
-        {
-            var hash = 23;
-            foreach (var c in value)
-            {
-                hash = hash * 31 + c;
-            }
-
-            return hash;
-        }
-    }
 
     /// <summary>
     /// Buckets the developer's commits into a 24 (hour) by 7 (weekday) grid, using
@@ -447,9 +402,6 @@ else
     private static string ThresholdPercentCss(WellnessOptions options) =>
         (options.OutOfHoursThreshold * 100m).ToString("0.##", CultureInfo.InvariantCulture);
 
-    private static string FormatShare(decimal? share) =>
-        share is { } value ? $"{Math.Round(value * 100m, MidpointRounding.AwayFromZero):0}%" : "—";
-
     /// <summary>The PRs-opened stat tile's subtext (ui-design.md section 4.4): the changes-requested share once <see cref="QualityQuantitySnapshot.SufficientSample"/> holds, otherwise the below-sample note — mirroring the <c>/quality</c> page's own sample guard (FR-027).</summary>
     private static string PrsOpenedSubtext(QualityQuantitySnapshot? snapshot) =>
         snapshot is { SufficientSample: true, ChangesRequestedShare: { } share }
@@ -457,10 +409,10 @@ else
             : "below review-data sample";
 
     private static string ShareBarAriaLabel(decimal? share, WellnessOptions options) =>
-        $"Out-of-hours commit share: {FormatShare(share)}, threshold {ThresholdPercentCss(options)}%";
+        $"Out-of-hours commit share: {DisplayFormat.FormatShare(share)}, threshold {ThresholdPercentCss(options)}%";
 
     private static string PrShareBarAriaLabel(PrAfterHoursResult? result, WellnessOptions options) =>
-        $"Out-of-hours PR activity share: {FormatShare(result?.Share)}, threshold {ThresholdPercentCss(options)}%";
+        $"Out-of-hours PR activity share: {DisplayFormat.FormatShare(result?.Share)}, threshold {ThresholdPercentCss(options)}%";
 
     private sealed record HeatmapCell(int Count, bool IsOutOfHours);
 }

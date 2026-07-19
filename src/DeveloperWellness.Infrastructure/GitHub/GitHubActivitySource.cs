@@ -15,12 +15,16 @@ namespace DeveloperWellness.Infrastructure.GitHub;
 /// via a blanket <c>using</c>, because <c>Octokit.Team</c> and <c>Octokit.Project</c> would otherwise
 /// collide with the Domain model types of the same name.
 ///
-/// Rate-limit hardening: every remote call below runs strictly one at a time (<see cref="MaxConcurrentRepoFetches"/>)
-/// and is paced by a small fixed delay (<see cref="PaceAsync"/>) per GitHub's own guidance for avoiding its
-/// secondary/burst limiter. <see cref="ActivitySourceFailureKind.RateLimited"/> failures carry one of two
-/// distinct user-presentable messages depending on which limiter tripped (<see cref="SelectRateLimitMessage"/>),
-/// and every thrown <see cref="ActivitySourceException"/> is logged once as a warning via the injected
-/// <paramref name="logger"/>.
+/// Rate-limit hardening (throughput fix): up to <see cref="MaxConcurrentRepoFetches"/> repositories now
+/// fetch concurrently, and every remote call below — across every concurrent worker — is paced by one
+/// shared, per-load <see cref="RequestPacer"/> that enforces a minimum spacing between call starts rather
+/// than running the whole pipeline strictly one call at a time. The real defence against GitHub's
+/// secondary/burst limiter is no longer serialization; it is that shared global pace together with
+/// <c>DashboardQueryService</c>'s single-flight coalescing upstream, which already prevents the
+/// multi-circuit stampede that historically tripped the burst limiter in the first place.
+/// <see cref="ActivitySourceFailureKind.RateLimited"/> failures carry one of two distinct user-presentable
+/// messages depending on which limiter tripped (<see cref="SelectRateLimitMessage"/>), and every thrown
+/// <see cref="ActivitySourceException"/> is logged once as a warning via the injected <paramref name="logger"/>.
 /// </summary>
 public sealed class GitHubActivitySource(
     IOptions<GitHubOptions> gitHubOptions,
@@ -31,15 +35,15 @@ public sealed class GitHubActivitySource(
     private const int PageSize = 100;
 
     /// <summary>
-    /// Upper bound on repositories fetched concurrently. Reduced from 2 to 1 (rate-limit hardening,
-    /// serialization): GitHub's documented guidance for avoiding its secondary/burst limiter is to make
-    /// requests serially with no concurrency at all, not merely with a smaller concurrency window, so
-    /// repository fetches now run strictly one at a time rather than two-at-once, on top of each
-    /// repository's own calls already being paced (see <see cref="PaceAsync"/>). The <see cref="SemaphoreSlim"/>
-    /// gate in <see cref="FetchAllRepoActivityAsync"/> is kept at capacity 1 rather than removed outright,
-    /// so a future relaxation of this constant does not require restructuring the fetch loop.
+    /// Upper bound on repositories fetched concurrently. Raised from 1 to 3 (rate-limit hardening,
+    /// throughput fix): GitHub's documented secondary/burst-limiter guidance caps out at roughly 100
+    /// concurrent requests, so 3-wide repository fetching stays far inside that ceiling. The real throttle
+    /// is no longer this concurrency width; it is the single shared <see cref="RequestPacer"/> every
+    /// worker awaits before each call, which caps overall call-start throughput regardless of how many
+    /// repositories run at once. The <see cref="SemaphoreSlim"/> gate in <see cref="FetchAllRepoActivityAsync"/>
+    /// keeps this constant a one-line dial rather than a fetch-loop restructuring if it needs to move again.
     /// </summary>
-    private const int MaxConcurrentRepoFetches = 1;
+    private const int MaxConcurrentRepoFetches = 3;
 
     /// <summary>
     /// Hard page-count cap on the branch list itself (documented coverage bound, in the spirit of research
@@ -80,24 +84,6 @@ public sealed class GitHubActivitySource(
     private const int MinRemainingRequestBudget = 300;
 
     /// <summary>
-    /// Fixed pause awaited before every individual GitHub REST call in the org-level and per-repository
-    /// fetch pipelines below, via <see cref="PaceAsync"/> (rate-limit hardening, pacing): GitHub's
-    /// documented guidance for avoiding its secondary/burst limiter is to pace requests rather than fire
-    /// them back-to-back, on top of running them strictly serially (see <see cref="MaxConcurrentRepoFetches"/>).
-    /// Throughput math at the default caps (10 repositories, 20 branches per repository): a full
-    /// organisation load's worst case is on the order of a few hundred GitHub REST calls in total (branch
-    /// and commit lists, PR pages, reviews, comments, and weekly-participation stats across every covered
-    /// repository, plus the org roster and team membership calls) — roughly 300-400 in practice, ~350 as a
-    /// round figure. At 25ms each (trimmed from 75ms, startup-load fix: still strictly serial and still
-    /// comfortably polite per GitHub's secondary-limit guidance, which asks for pacing and no concurrency,
-    /// not a specific minimum delay), that adds only ~9 seconds of pure pacing delay on top of GitHub's own
-    /// response latency, on a live circuit that now starts this fetch from <c>OnAfterRenderAsync</c> rather
-    /// than blocking Blazor's prerendered response behind it (see <c>EagerLoadGate</c>) — the loading state
-    /// the UI already shows while a load is in flight, not something that blocks the initial page paint.
-    /// </summary>
-    private static readonly TimeSpan InterCallDelay = TimeSpan.FromMilliseconds(25);
-
-    /// <summary>
     /// The message shown when GitHub's primary hourly request budget is genuinely exhausted (rate-limit
     /// hardening, message selection): distinct from <see cref="SecondaryRateLimitMessage"/> because the two
     /// failures have different causes and different user framing, even though both map to
@@ -118,18 +104,81 @@ public sealed class GitHubActivitySource(
     private Octokit.GitHubClient? _client;
 
     /// <summary>
-    /// Mutable request-count accumulator threaded through one <see cref="GetActivityAsync"/> call's fetch
-    /// pipeline (diagnostics): every <see cref="PaceAsync"/> call increments it once per GitHub REST call it
-    /// paces, so the information-level log at the end of a successful load can report an approximate
-    /// request-count estimate at effectively no extra cost. Not thread-safe by design: <see
-    /// cref="MaxConcurrentRepoFetches"/> keeps the whole fetch pipeline strictly serial (one repository, one
-    /// remote call, at a time), so exactly one caller is ever incrementing a given instance at once.
+    /// Thread-safe, per-load call pacer (rate-limit hardening, throughput fix): serializes only the START
+    /// of each GitHub REST call to a minimum spacing of <see cref="MinCallInterval"/>, globally across every
+    /// concurrent repository worker (<see cref="MaxConcurrentRepoFetches"/>), rather than gating how many
+    /// calls run at once or forcing the whole pipeline strictly serial. Every remote call in the org-level
+    /// and per-repository fetch pipelines below awaits <see cref="WaitAsync"/> first — the direct
+    /// replacement for the old static <c>PaceAsync</c> helper and its per-call <c>RequestCounter</c>
+    /// accumulator; the preflight budget check deliberately does not pace itself (see its own remarks). One
+    /// instance is created per <see cref="GetActivityAsync"/> call and threaded through that call's entire
+    /// fetch pipeline, so <see cref="Count"/> reports exactly that load's request count for the end-of-load
+    /// diagnostic log. Unlike the old counter it replaces, this type is safe to share across the
+    /// now-concurrent repository workers: every read and mutation happens under <see cref="_gate"/>.
     /// </summary>
-    private sealed class RequestCounter
+    private sealed class RequestPacer
     {
-        public int Count { get; private set; }
+        /// <summary>
+        /// Minimum spacing enforced between call starts, globally across every concurrent worker
+        /// (rate-limit hardening, throughput fix): GitHub's documented secondary/burst-limiter guidance for
+        /// REST GETs is roughly 900 points/minute (a simple GET typically costs one point) and at most
+        /// around 100 concurrent requests; 100ms between call starts caps this pipeline at 600 requests per
+        /// minute at <see cref="MaxConcurrentRepoFetches"/>-wide (3) concurrency, comfortably inside both
+        /// ceilings. Replaces the old fixed 25ms <c>InterCallDelay</c> awaited before every call on a
+        /// strictly serial (<c>MaxConcurrentRepoFetches = 1</c>) pipeline — a design that, at roughly 350
+        /// calls per load, cost on the order of 350 x (~300ms GitHub latency + 25ms pacing), close to two
+        /// minutes, because every call waited for the previous one to fully round-trip before it could even
+        /// start. Throughput math at the new caps: a full organisation load now issues on the order of
+        /// 150-250 GitHub REST calls (branch and commit lists at the reduced default <c>BranchCap</c> of 5,
+        /// PR pages, reviews, comments, weekly-participation stats, and the one extra
+        /// <c>stats/contributors</c> call per repository for the lines-changed metric, across every covered
+        /// repository, plus the org roster and team membership calls). At 3-wide concurrency behind this
+        /// 100ms global gate, that is roughly 15-25 seconds of pacing and GitHub round-trip time in total,
+        /// rather than minutes — up to 3 calls can now be in flight awaiting their own response at once,
+        /// instead of the whole pipeline waiting on one call at a time.
+        /// </summary>
+        private static readonly TimeSpan MinCallInterval = TimeSpan.FromMilliseconds(100);
 
-        public void Increment() => Count++;
+        private readonly object _gate = new();
+        private long _nextSlotTicks;
+        private int _count;
+
+        /// <summary>The number of calls paced so far by this instance (diagnostics), read under <see cref="_gate"/> for a consistent snapshot.</summary>
+        public int Count
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _count;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Reserves the next available call-start slot at least <see cref="MinCallInterval"/> after the
+        /// previously reserved slot (and never earlier than now), then awaits until that slot arrives. Slot
+        /// reservation happens under <see cref="_gate"/> so concurrent callers never reserve the same or an
+        /// overlapping slot; the actual wait happens outside the lock so one caller's delay never blocks
+        /// another caller's reservation.
+        /// </summary>
+        public async Task WaitAsync(CancellationToken cancellationToken)
+        {
+            TimeSpan delay;
+            lock (_gate)
+            {
+                _count++;
+                var nowTicks = DateTime.UtcNow.Ticks;
+                var slotTicks = Math.Max(nowTicks, _nextSlotTicks);
+                _nextSlotTicks = slotTicks + MinCallInterval.Ticks;
+                delay = TimeSpan.FromTicks(slotTicks - nowTicks);
+            }
+
+            if (delay > TimeSpan.Zero)
+            {
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     /// <summary>The remaining/limit/reset triple read from GitHub's own <c>/rate_limit</c> endpoint by the preflight check.</summary>
@@ -175,19 +224,19 @@ public sealed class GitHubActivitySource(
                 PrimaryRateLimitMessage, innerException: null, ActivitySourceFailureKind.RateLimited, snapshot.Reset);
         }
 
-        var requestCounter = new RequestCounter();
+        var requestPacer = new RequestPacer();
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
         try
         {
             var dataset = await FetchDatasetAsync(
-                    client, options.Organisation, scope, period, wellnessOptions.Value, requestCounter, cancellationToken)
+                    client, options.Organisation, scope, period, wellnessOptions.Value, requestPacer, cancellationToken)
                 .ConfigureAwait(false);
 
             logger.LogInformation(
                 "GitHub load completed in {ElapsedMilliseconds}ms using approximately {RequestCount} requests.",
                 stopwatch.ElapsedMilliseconds,
-                requestCounter.Count);
+                requestPacer.Count);
 
             return dataset;
         }
@@ -358,18 +407,6 @@ public sealed class GitHubActivitySource(
         }
     }
 
-    /// <summary>
-    /// Awaits <see cref="InterCallDelay"/> and increments <paramref name="counter"/> immediately before the
-    /// caller issues its next GitHub REST call (rate-limit hardening, pacing). Every remote call in the
-    /// org-level and per-repository fetch pipelines below calls this first; the preflight budget check
-    /// deliberately does not (see its own remarks).
-    /// </summary>
-    private static async Task PaceAsync(RequestCounter counter, CancellationToken cancellationToken)
-    {
-        counter.Increment();
-        await Task.Delay(InterCallDelay, cancellationToken).ConfigureAwait(false);
-    }
-
     /// <summary>Assembles the full dataset for one scope and period (research R2, data-model.md ActivityDataset).</summary>
     private static async Task<ActivityDataset> FetchDatasetAsync(
         Octokit.GitHubClient client,
@@ -377,30 +414,31 @@ public sealed class GitHubActivitySource(
         ScopeKey scope,
         Period period,
         WellnessOptions options,
-        RequestCounter counter,
+        RequestPacer pacer,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
+        await pacer.WaitAsync(cancellationToken).ConfigureAwait(false);
         var members = await client.Organization.Member.GetAll(organisation, new Octokit.ApiOptions { PageSize = PageSize })
             .ConfigureAwait(false);
         var roster = members.Select(MapDeveloper).ToList();
 
         cancellationToken.ThrowIfCancellationRequested();
-        var teams = await FetchTeamsAsync(client, organisation, counter, cancellationToken).ConfigureAwait(false);
+        var teams = await FetchTeamsAsync(client, organisation, pacer, cancellationToken).ConfigureAwait(false);
 
         cancellationToken.ThrowIfCancellationRequested();
-        var repositories = await FetchCoveredRepositoriesAsync(client, organisation, scope, options.RepoCap, counter, cancellationToken)
+        var repositories = await FetchCoveredRepositoriesAsync(client, organisation, scope, options.RepoCap, pacer, cancellationToken)
             .ConfigureAwait(false);
         var projects = repositories.Select(MapProject).ToList();
         var coveredProjectNames = projects.Select(p => p.Name).ToList();
 
         cancellationToken.ThrowIfCancellationRequested();
-        var repoResults = await FetchAllRepoActivityAsync(client, organisation, repositories, period, options, counter, cancellationToken)
+        var repoResults = await FetchAllRepoActivityAsync(client, organisation, repositories, period, options, pacer, cancellationToken)
             .ConfigureAwait(false);
 
         var events = DeduplicateCommits(repoResults.SelectMany(r => r.Events));
         var weeklyCommitCounts = SumWeeklyParticipation(repoResults.Select(r => r.WeeklyParticipation), options.TrendWeeks);
+        var linesChangedByAuthor = MergeLinesChangedByAuthor(repoResults.Select(r => r.LinesChangedByAuthor));
 
         return new ActivityDataset(
             roster: roster,
@@ -409,6 +447,7 @@ public sealed class GitHubActivitySource(
             events: events,
             weeklyCommitCounts: weeklyCommitCounts,
             coveredProjectNames: coveredProjectNames,
+            linesChangedByAuthor: linesChangedByAuthor,
             loadedAt: DateTimeOffset.UtcNow,
             isDemoData: false);
     }
@@ -425,12 +464,12 @@ public sealed class GitHubActivitySource(
     /// since silently returning zero teams on a throttled request would be misleading.
     /// </summary>
     private static async Task<IReadOnlyList<Team>> FetchTeamsAsync(
-        Octokit.GitHubClient client, string organisation, RequestCounter counter, CancellationToken cancellationToken)
+        Octokit.GitHubClient client, string organisation, RequestPacer pacer, CancellationToken cancellationToken)
     {
         IReadOnlyList<Octokit.Team> rawTeams;
         try
         {
-            await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
+            await pacer.WaitAsync(cancellationToken).ConfigureAwait(false);
             rawTeams = await client.Organization.Team.GetAll(organisation, new Octokit.ApiOptions { PageSize = PageSize })
                 .ConfigureAwait(false);
         }
@@ -460,7 +499,7 @@ public sealed class GitHubActivitySource(
             IReadOnlyList<Octokit.User> members;
             try
             {
-                await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
+                await pacer.WaitAsync(cancellationToken).ConfigureAwait(false);
                 members = await client.Organization.Team.GetAllMembers(rawTeam.Id, new Octokit.ApiOptions { PageSize = PageSize })
                     .ConfigureAwait(false);
             }
@@ -533,7 +572,7 @@ public sealed class GitHubActivitySource(
         string organisation,
         ScopeKey scope,
         int repoCap,
-        RequestCounter counter,
+        RequestPacer pacer,
         CancellationToken cancellationToken)
     {
         if (scope.Kind == ScopeKind.Project)
@@ -541,7 +580,7 @@ public sealed class GitHubActivitySource(
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
+                await pacer.WaitAsync(cancellationToken).ConfigureAwait(false);
                 var repository = await client.Repository.Get(organisation, scope.ProjectName!).ConfigureAwait(false);
                 return [repository];
             }
@@ -555,7 +594,7 @@ public sealed class GitHubActivitySource(
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
+        await pacer.WaitAsync(cancellationToken).ConfigureAwait(false);
         var repositories = await client.Repository.GetAllForOrg(organisation, new Octokit.ApiOptions { PageSize = PageSize })
             .ConfigureAwait(false);
 
@@ -578,12 +617,20 @@ public sealed class GitHubActivitySource(
     // Per-repository activity: commits, PRs/reviews, comments, weekly participation.
     // ---------------------------------------------------------------------------------------------
 
-    /// <summary>The events and weekly participation series fetched for a single repository.</summary>
-    private readonly record struct RepoActivityResult(IReadOnlyList<ActivityEvent> Events, IReadOnlyList<int> WeeklyParticipation);
+    /// <summary>The events, weekly participation series, and per-author lines-changed totals fetched for a single repository.</summary>
+    private readonly record struct RepoActivityResult(
+        IReadOnlyList<ActivityEvent> Events,
+        IReadOnlyList<int> WeeklyParticipation,
+        IReadOnlyDictionary<DeveloperLogin, int> LinesChangedByAuthor);
 
     /// <summary>
     /// Fetches every covered repository's activity, bounded to <see cref="MaxConcurrentRepoFetches"/>
-    /// repositories in flight at once (rate-limit hardening: currently 1, i.e. strictly serial).
+    /// repositories in flight at once (rate-limit hardening, throughput fix: 3-wide). Every worker awaits
+    /// the same shared <paramref name="pacer"/> before each of its own calls, so overall call-start
+    /// throughput stays capped regardless of how many repositories run concurrently. Safe by construction:
+    /// <see cref="FetchRepoActivityAsync"/>'s per-branch <c>seenShas</c> dedup set (see
+    /// <see cref="FetchCommitEventsAsync"/>) is a fresh local instance per repository, never shared across
+    /// workers, so concurrent repository fetches never contend over it.
     /// </summary>
     private static async Task<IReadOnlyList<RepoActivityResult>> FetchAllRepoActivityAsync(
         Octokit.GitHubClient client,
@@ -591,7 +638,7 @@ public sealed class GitHubActivitySource(
         IReadOnlyList<Octokit.Repository> repositories,
         Period period,
         WellnessOptions options,
-        RequestCounter counter,
+        RequestPacer pacer,
         CancellationToken cancellationToken)
     {
         using var gate = new SemaphoreSlim(MaxConcurrentRepoFetches);
@@ -602,7 +649,7 @@ public sealed class GitHubActivitySource(
             try
             {
                 return await FetchRepoActivityAsync(
-                        client, organisation, repository.Name, repository.DefaultBranch, period, options, counter, cancellationToken)
+                        client, organisation, repository.Name, repository.DefaultBranch, period, options, pacer, cancellationToken)
                     .ConfigureAwait(false);
             }
             finally
@@ -615,7 +662,10 @@ public sealed class GitHubActivitySource(
         return await Task.WhenAll(tasks).ConfigureAwait(false);
     }
 
-    /// <summary>Fetches one repository's commits, PR/review/PR-opened events, comments, and weekly participation.</summary>
+    /// <summary>
+    /// Fetches one repository's commits, PR/review/PR-opened events, comments, weekly participation, and
+    /// per-author lines-changed totals (commit-size/volume metric).
+    /// </summary>
     private static async Task<RepoActivityResult> FetchRepoActivityAsync(
         Octokit.GitHubClient client,
         string organisation,
@@ -623,29 +673,32 @@ public sealed class GitHubActivitySource(
         string? defaultBranchName,
         Period period,
         WellnessOptions options,
-        RequestCounter counter,
+        RequestPacer pacer,
         CancellationToken cancellationToken)
     {
         var events = new List<ActivityEvent>();
 
         events.AddRange(
             await FetchCommitEventsAsync(
-                    client, organisation, repositoryName, defaultBranchName, period, options.BranchCap, counter, cancellationToken)
+                    client, organisation, repositoryName, defaultBranchName, period, options.BranchCap, pacer, cancellationToken)
                 .ConfigureAwait(false));
 
-        var pullRequests = await FetchPullRequestsUpdatedInPeriodAsync(client, organisation, repositoryName, period, counter, cancellationToken)
+        var pullRequests = await FetchPullRequestsUpdatedInPeriodAsync(client, organisation, repositoryName, period, pacer, cancellationToken)
             .ConfigureAwait(false);
         events.AddRange(
-            await FetchPullRequestEventsAsync(client, organisation, repositoryName, pullRequests, period, counter, cancellationToken)
+            await FetchPullRequestEventsAsync(client, organisation, repositoryName, pullRequests, period, pacer, cancellationToken)
                 .ConfigureAwait(false));
 
         events.AddRange(
-            await FetchCommentEventsAsync(client, organisation, repositoryName, period, counter, cancellationToken).ConfigureAwait(false));
+            await FetchCommentEventsAsync(client, organisation, repositoryName, period, pacer, cancellationToken).ConfigureAwait(false));
 
-        var weeklyParticipation = await FetchWeeklyParticipationAsync(client, organisation, repositoryName, counter, cancellationToken)
+        var weeklyParticipation = await FetchWeeklyParticipationAsync(client, organisation, repositoryName, pacer, cancellationToken)
             .ConfigureAwait(false);
 
-        return new RepoActivityResult(events, weeklyParticipation);
+        var linesChangedByAuthor = await FetchLinesChangedAsync(client, organisation, repositoryName, period, pacer, cancellationToken)
+            .ConfigureAwait(false);
+
+        return new RepoActivityResult(events, weeklyParticipation, linesChangedByAuthor);
     }
 
     /// <summary>
@@ -666,11 +719,11 @@ public sealed class GitHubActivitySource(
         string? defaultBranchName,
         Period period,
         int branchCap,
-        RequestCounter counter,
+        RequestPacer pacer,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
+        await pacer.WaitAsync(cancellationToken).ConfigureAwait(false);
         var branches = await client.Repository.Branch.GetAll(
                 organisation, repositoryName, new Octokit.ApiOptions { PageSize = PageSize, PageCount = BranchListPageCount })
             .ConfigureAwait(false);
@@ -696,7 +749,7 @@ public sealed class GitHubActivitySource(
             }
 
             var commitRequest = new Octokit.CommitRequest { Since = period.Start, Sha = branch.Name };
-            await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
+            await pacer.WaitAsync(cancellationToken).ConfigureAwait(false);
             var commits = await client.Repository.Commit.GetAll(
                     organisation, repositoryName, commitRequest, new Octokit.ApiOptions { PageSize = PageSize, PageCount = CommitPageCountPerBranch })
                 .ConfigureAwait(false);
@@ -763,7 +816,7 @@ public sealed class GitHubActivitySource(
         string organisation,
         string repositoryName,
         Period period,
-        RequestCounter counter,
+        RequestPacer pacer,
         CancellationToken cancellationToken)
     {
         var request = new Octokit.PullRequestRequest
@@ -780,7 +833,7 @@ public sealed class GitHubActivitySource(
         {
             cancellationToken.ThrowIfCancellationRequested();
             var pageOptions = new Octokit.ApiOptions { PageSize = PageSize, StartPage = page, PageCount = 1 };
-            await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
+            await pacer.WaitAsync(cancellationToken).ConfigureAwait(false);
             var batch = await client.PullRequest.GetAllForRepository(organisation, repositoryName, request, pageOptions)
                 .ConfigureAwait(false);
 
@@ -822,7 +875,7 @@ public sealed class GitHubActivitySource(
         string repositoryName,
         IReadOnlyList<Octokit.PullRequest> pullRequests,
         Period period,
-        RequestCounter counter,
+        RequestPacer pacer,
         CancellationToken cancellationToken)
     {
         var events = new List<ActivityEvent>();
@@ -835,7 +888,7 @@ public sealed class GitHubActivitySource(
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
+            await pacer.WaitAsync(cancellationToken).ConfigureAwait(false);
             var reviews = await client.PullRequest.Review.GetAll(
                     organisation, repositoryName, pullRequest.Number, new Octokit.ApiOptions { PageSize = PageSize, PageCount = ReviewPageCountPerPr })
                 .ConfigureAwait(false);
@@ -892,13 +945,13 @@ public sealed class GitHubActivitySource(
         string organisation,
         string repositoryName,
         Period period,
-        RequestCounter counter,
+        RequestPacer pacer,
         CancellationToken cancellationToken)
     {
         var events = new List<ActivityEvent>();
 
         cancellationToken.ThrowIfCancellationRequested();
-        await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
+        await pacer.WaitAsync(cancellationToken).ConfigureAwait(false);
         var issueComments = await client.Issue.Comment.GetAllForRepository(
                 organisation,
                 repositoryName,
@@ -917,7 +970,7 @@ public sealed class GitHubActivitySource(
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
+        await pacer.WaitAsync(cancellationToken).ConfigureAwait(false);
         var reviewComments = await client.PullRequest.ReviewComment.GetAllForRepository(
                 organisation,
                 repositoryName,
@@ -944,12 +997,12 @@ public sealed class GitHubActivitySource(
     /// is skipped rather than failing the whole load. Rate-limit failures still propagate.
     /// </summary>
     private static async Task<IReadOnlyList<int>> FetchWeeklyParticipationAsync(
-        Octokit.GitHubClient client, string organisation, string repositoryName, RequestCounter counter, CancellationToken cancellationToken)
+        Octokit.GitHubClient client, string organisation, string repositoryName, RequestPacer pacer, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            await PaceAsync(counter, cancellationToken).ConfigureAwait(false);
+            await pacer.WaitAsync(cancellationToken).ConfigureAwait(false);
             var participation = await client.Repository.Statistics.GetParticipation(organisation, repositoryName, cancellationToken)
                 .ConfigureAwait(false);
             return participation?.All ?? [];
@@ -970,6 +1023,110 @@ public sealed class GitHubActivitySource(
         {
             return [];
         }
+    }
+
+    /// <summary>
+    /// Fetches the repository's per-author weekly lines-changed statistics
+    /// (<c>GET /repos/{owner}/{repo}/stats/contributors</c>) and reduces them to per-author totals within
+    /// <paramref name="period"/> via <see cref="SumLinesChangedWithinPeriod"/> (commit-size/volume metric).
+    /// Mirrors <see cref="FetchWeeklyParticipationAsync"/>'s still-computing/unavailable skip semantics: the
+    /// statistics endpoint can fail for a repository (e.g. GitHub has not finished computing it yet), in
+    /// which case that repository simply contributes no entries rather than failing the whole load.
+    /// Rate-limit failures still propagate.
+    /// </summary>
+    private static async Task<IReadOnlyDictionary<DeveloperLogin, int>> FetchLinesChangedAsync(
+        Octokit.GitHubClient client, string organisation, string repositoryName, Period period, RequestPacer pacer, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            await pacer.WaitAsync(cancellationToken).ConfigureAwait(false);
+            var contributors = await client.Repository.Statistics.GetContributors(organisation, repositoryName, cancellationToken)
+                .ConfigureAwait(false);
+            return SumLinesChangedWithinPeriod(contributors, period);
+        }
+        catch (Octokit.RateLimitExceededException)
+        {
+            throw;
+        }
+        catch (Octokit.SecondaryRateLimitExceededException)
+        {
+            throw;
+        }
+        catch (Octokit.AbuseException)
+        {
+            throw;
+        }
+        catch (Octokit.ApiException)
+        {
+            return new Dictionary<DeveloperLogin, int>();
+        }
+    }
+
+    /// <summary>
+    /// Reduces one repository's raw weekly contributor statistics to per-author lines-changed totals
+    /// (additions plus deletions) for the weeks that overlap <paramref name="period"/> (commit-size/volume
+    /// metric, pure and unit-testable). Each contributor's weeks cover a full calendar year of history
+    /// starting Sunday; a week is included whenever its 7-day window <c>[weekStart, weekStart + 7d)</c>
+    /// overlaps <c>[period.Start, period.End]</c> at all, since GitHub's own week boundaries never align
+    /// exactly to an arbitrary wellness period. Logins are resolved via <see cref="AuthorFrom"/>; a
+    /// contributor GitHub could not associate with a login (<see cref="DeveloperLogin.Unmatched"/>) is
+    /// skipped entirely rather than folded into a shared bucket, since an unmatched total could not be
+    /// attributed to any developer row downstream anyway.
+    /// </summary>
+    internal static IReadOnlyDictionary<DeveloperLogin, int> SumLinesChangedWithinPeriod(
+        IReadOnlyList<Octokit.Contributor> contributors, Period period)
+    {
+        var totalsByAuthor = new Dictionary<DeveloperLogin, int>();
+
+        foreach (var contributor in contributors)
+        {
+            var author = AuthorFrom(contributor.Author?.Login);
+            if (author.IsUnmatched)
+            {
+                continue;
+            }
+
+            var linesChanged = 0;
+            foreach (var week in contributor.Weeks)
+            {
+                var weekStart = week.Week;
+                var weekEnd = weekStart + TimeSpan.FromDays(7);
+
+                var overlapsPeriod = weekStart <= period.End && weekEnd > period.Start;
+                if (!overlapsPeriod)
+                {
+                    continue;
+                }
+
+                linesChanged += week.Additions + week.Deletions;
+            }
+
+            totalsByAuthor[author] = totalsByAuthor.GetValueOrDefault(author) + linesChanged;
+        }
+
+        return totalsByAuthor;
+    }
+
+    /// <summary>
+    /// Sums every covered repository's per-author lines-changed totals into one dataset-wide dictionary
+    /// (commit-size/volume metric, pure and unit-testable), mirroring <see cref="SumWeeklyParticipation"/>'s
+    /// merge-across-repositories shape.
+    /// </summary>
+    internal static IReadOnlyDictionary<DeveloperLogin, int> MergeLinesChangedByAuthor(
+        IEnumerable<IReadOnlyDictionary<DeveloperLogin, int>> perRepositoryTotals)
+    {
+        var merged = new Dictionary<DeveloperLogin, int>();
+
+        foreach (var repositoryTotals in perRepositoryTotals)
+        {
+            foreach (var (author, linesChanged) in repositoryTotals)
+            {
+                merged[author] = merged.GetValueOrDefault(author) + linesChanged;
+            }
+        }
+
+        return merged;
     }
 
     /// <summary>

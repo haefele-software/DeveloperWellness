@@ -180,6 +180,18 @@ public sealed class DashboardQueryService(IActivitySource activitySource, IMemor
     /// guards a race against <see cref="RefreshAsync"/> replacing the entry with a newer forced load while
     /// this one is still finishing, which must not clobber that newer entry on its way out.
     /// </summary>
+    /// <remarks>
+    /// Built on a <see cref="TaskCompletionSource{TResult}"/> rather than an async local method returning
+    /// its own task, specifically so the tracked handle (<c>tcs.Task</c>) exists — a stable, comparable
+    /// object — before <see cref="RunAndCompleteAsync"/> starts. An earlier version tried to capture "this
+    /// call's own task" via a closure over a local variable assigned from the async method's return value;
+    /// that ordering assumption breaks whenever the underlying load completes synchronously (a scripted
+    /// test double with no real I/O, or a fast-failing real one, e.g. missing credentials) — the async
+    /// method can run to completion, including its own cleanup, before the assignment that was supposed to
+    /// give it something to compare against ever executes, so the cleanup silently no-ops and the entry
+    /// leaks forever, wrongly joining every later caller to an already-finished result. A
+    /// <see cref="TaskCompletionSource{TResult}"/>'s <c>Task</c> has no such ordering dependency.
+    /// </remarks>
     private Task<DashboardResult> GetOrStartCoalescedLoad(ScopeKey scope, int periodDays, string cacheKey, bool forceNew)
     {
         lock (_inFlightGate)
@@ -189,26 +201,38 @@ public sealed class DashboardQueryService(IActivitySource activitySource, IMemor
                 return existing;
             }
 
-            Task<DashboardResult>? self = null;
-            self = RunCoalescedLoadAsync(scope, periodDays, cacheKey, () => self);
-            _inFlightLoads[cacheKey] = self;
-            return self;
+            var completionSource = new TaskCompletionSource<DashboardResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _inFlightLoads[cacheKey] = completionSource.Task;
+            _ = RunAndCompleteAsync(scope, periodDays, cacheKey, completionSource);
+            return completionSource.Task;
         }
     }
 
-    /// <summary>Runs one coalesced <see cref="LoadAsync"/> call and untracks it from <see cref="_inFlightLoads"/> on completion (see <see cref="GetOrStartCoalescedLoad"/>).</summary>
-    private async Task<DashboardResult> RunCoalescedLoadAsync(
-        ScopeKey scope, int periodDays, string cacheKey, Func<Task<DashboardResult>?> self)
+    /// <summary>
+    /// Runs one coalesced <see cref="LoadAsync"/> call, completes <paramref name="completionSource"/> with
+    /// its outcome (result or exception — <see cref="LoadAsync"/> itself only ever throws for a genuinely
+    /// unexpected bug, never for an <see cref="ActivitySourceException"/>, which it turns into a failed
+    /// <see cref="DashboardResult"/> instead), and untracks the entry from <see cref="_inFlightLoads"/>
+    /// (see <see cref="GetOrStartCoalescedLoad"/>'s remarks for why identity is checked against
+    /// <c>completionSource.Task</c> rather than assumed).
+    /// </summary>
+    private async Task RunAndCompleteAsync(
+        ScopeKey scope, int periodDays, string cacheKey, TaskCompletionSource<DashboardResult> completionSource)
     {
         try
         {
-            return await LoadAsync(scope, periodDays, cacheKey, CancellationToken.None).ConfigureAwait(false);
+            var result = await LoadAsync(scope, periodDays, cacheKey, CancellationToken.None).ConfigureAwait(false);
+            completionSource.SetResult(result);
+        }
+        catch (Exception ex)
+        {
+            completionSource.SetException(ex);
         }
         finally
         {
             lock (_inFlightGate)
             {
-                if (_inFlightLoads.TryGetValue(cacheKey, out var current) && ReferenceEquals(current, self()))
+                if (_inFlightLoads.TryGetValue(cacheKey, out var current) && ReferenceEquals(current, completionSource.Task))
                 {
                     _inFlightLoads.Remove(cacheKey);
                 }

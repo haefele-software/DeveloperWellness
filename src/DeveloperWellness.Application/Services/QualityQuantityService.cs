@@ -38,7 +38,31 @@ public sealed class QualityQuantityService(DashboardQueryService queryService, I
     public async Task<QualityQuantityResult> GetAsync(ScopeKey scope, int periodDays, CancellationToken cancellationToken)
     {
         var result = await _queryService.GetAsync(scope, periodDays, cancellationToken).ConfigureAwait(false);
+        return ComposeResult(result, periodDays);
+    }
 
+    /// <summary>
+    /// Evicts any cached dataset for <paramref name="scope"/> and <paramref name="periodDays"/> via
+    /// <see cref="DashboardQueryService.RefreshAsync"/> and computes the rows from the fresh dataset
+    /// unconditionally (FR-021 explicit refresh). The Quality page's "Try again" action uses this rather
+    /// than <see cref="GetAsync"/>, mirroring every other page's cache-bypassing retry path
+    /// (<see cref="OverviewService.RefreshAsync"/> pairs the same way around
+    /// <see cref="CheckInService.RefreshRosterAsync"/>).
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="scope"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="periodDays"/> is not 7, 14, or 30.</exception>
+    public async Task<QualityQuantityResult> RefreshAsync(ScopeKey scope, int periodDays, CancellationToken cancellationToken)
+    {
+        var result = await _queryService.RefreshAsync(scope, periodDays, cancellationToken).ConfigureAwait(false);
+        return ComposeResult(result, periodDays);
+    }
+
+    /// <summary>
+    /// Shared tail of <see cref="GetAsync"/> and <see cref="RefreshAsync"/>: they differ only in which
+    /// <see cref="DashboardQueryService"/> fetch call produced <paramref name="result"/>.
+    /// </summary>
+    private QualityQuantityResult ComposeResult(DashboardResult result, int periodDays)
+    {
         if (result.Snapshot is not { } snapshot)
         {
             return new QualityQuantityResult(null, result);
@@ -49,9 +73,21 @@ public sealed class QualityQuantityService(DashboardQueryService queryService, I
             .Where(developer => !developer.IsBot)
             .ToDictionary(developer => developer.Login);
 
+        // Lines changed (commit-size/volume metric): the dataset-wide dictionary is empty exactly when
+        // GitHub's statistics endpoint was unavailable for every covered repository (ActivityDataset.
+        // LinesChangedByAuthor's remarks), in which case every row surfaces null (unknown) rather than a
+        // misleading zero. Otherwise a developer simply absent from the dictionary genuinely changed zero
+        // default-branch lines in the period, so GetValueOrDefault's zero is the correct reading.
+        var linesChangedByAuthor = snapshot.Dataset.LinesChangedByAuthor;
+        var statsUnavailable = linesChangedByAuthor.Count == 0;
+
         var rows = rushingResults
             .Where(pair => rosterByLogin.ContainsKey(pair.Key))
-            .Select(pair => new QualityQuantityRow(rosterByLogin[pair.Key], pair.Value.Snapshot, pair.Value.Flag))
+            .Select(pair => new QualityQuantityRow(
+                rosterByLogin[pair.Key],
+                pair.Value.Snapshot,
+                pair.Value.Flag,
+                statsUnavailable ? null : linesChangedByAuthor.GetValueOrDefault(pair.Key)))
             .ToList();
 
         return new QualityQuantityResult(rows, result);
@@ -67,7 +103,15 @@ public sealed record QualityQuantityResult(IReadOnlyList<QualityQuantityRow>? Ro
 
 /// <summary>
 /// One developer's quality-versus-quantity row for the <c>/quality</c> table (ui-design.md section 4.6):
-/// the roster developer, their volume-and-rework snapshot, and the <see cref="FlagKind.PossibleRushing"/>
-/// flag when raised.
+/// the roster developer, their volume-and-rework snapshot, the <see cref="FlagKind.PossibleRushing"/> flag
+/// when raised, and their lines-changed total for the period (commit-size/volume metric).
 /// </summary>
-public sealed record QualityQuantityRow(Developer Developer, QualityQuantitySnapshot Snapshot, WellbeingFlag? Flag);
+/// <param name="LinesChanged">
+/// Total lines changed (additions plus deletions) on the default branch for the period
+/// (<see cref="ActivityDataset.LinesChangedByAuthor"/>); null when GitHub's statistics
+/// endpoint was unavailable for the whole dataset, zero when it was available but this developer changed
+/// no default-branch lines in the period. Shown alongside <see cref="QualityQuantitySnapshot"/> — never
+/// folded into <see cref="QualityQuantitySnapshot.PossibleRushing"/>'s volume, which stays commits plus PRs
+/// opened per FR-027.
+/// </param>
+public sealed record QualityQuantityRow(Developer Developer, QualityQuantitySnapshot Snapshot, WellbeingFlag? Flag, int? LinesChanged);

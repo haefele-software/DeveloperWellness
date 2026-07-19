@@ -28,6 +28,7 @@ public class ActivityAggregatorTests
             events: events,
             weeklyCommitCounts: [],
             coveredProjectNames: [ProjectName],
+            linesChangedByAuthor: new Dictionary<DeveloperLogin, int>(),
             loadedAt: DateTimeOffset.UtcNow,
             isDemoData: true);
 

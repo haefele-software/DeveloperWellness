@@ -46,7 +46,34 @@ public sealed class OverviewService(
     public async Task<OverviewResult> GetAsync(ScopeKey scope, int periodDays, CancellationToken cancellationToken)
     {
         var rosterResult = await _checkInService.GetRosterAsync(scope, periodDays, cancellationToken).ConfigureAwait(false);
+        return await ComposeResultAsync(scope, periodDays, rosterResult, cancellationToken).ConfigureAwait(false);
+    }
 
+    /// <summary>
+    /// Evicts any cached dataset for <paramref name="scope"/> and <paramref name="periodDays"/> via
+    /// <see cref="CheckInService.RefreshRosterAsync"/> and composes the Overview snapshot from the fresh
+    /// roster unconditionally (FR-021 explicit refresh). The Overview page's "Try again" action uses this
+    /// rather than <see cref="GetAsync"/>, mirroring every other page's cache-bypassing retry path
+    /// (<see cref="CheckInService.RefreshRosterAsync"/> itself pairs the same way around
+    /// <see cref="DashboardQueryService.RefreshAsync"/>).
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="scope"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="periodDays"/> is not 7, 14, or 30.</exception>
+    public async Task<OverviewResult> RefreshAsync(ScopeKey scope, int periodDays, CancellationToken cancellationToken)
+    {
+        var rosterResult = await _checkInService.RefreshRosterAsync(scope, periodDays, cancellationToken).ConfigureAwait(false);
+        return await ComposeResultAsync(scope, periodDays, rosterResult, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Shared tail of <see cref="GetAsync"/> and <see cref="RefreshAsync"/>: they differ only in which
+    /// <see cref="CheckInService"/> roster call produced <paramref name="rosterResult"/>, mirroring exactly
+    /// how <see cref="CheckInService"/> itself pairs <see cref="CheckInService.GetRosterAsync"/> and
+    /// <see cref="CheckInService.RefreshRosterAsync"/> around one composition tail.
+    /// </summary>
+    private async Task<OverviewResult> ComposeResultAsync(
+        ScopeKey scope, int periodDays, CheckInRosterResult rosterResult, CancellationToken cancellationToken)
+    {
         if (rosterResult.Source.Snapshot is not { } snapshot || rosterResult.Composition is not { } composition)
         {
             return new OverviewResult(null, rosterResult.Source);

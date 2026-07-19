@@ -52,7 +52,7 @@ else
                 {
                     <li class="ov-recs-entry">
                         <div class="ov-recs-entry__who">
-                            <div class="overview-avatar" style="background-color:@AvatarColor(recommendation.Developer.Login)" aria-hidden="true">@Initials(recommendation.Developer.DisplayName)</div>
+                            <div class="overview-avatar" style="background-color:@DisplayFormat.AvatarColor(recommendation.Developer.Login)" aria-hidden="true">@DisplayFormat.Initials(recommendation.Developer.DisplayName)</div>
                             <div>
                                 <p class="ov-recs-entry__name">@recommendation.Developer.DisplayName</p>
                                 <p class="ov-recs-entry__team">@recommendation.TeamName</p>
@@ -93,7 +93,7 @@ else
         <div class="ov-kpi-tile">
             <span class="ov-kpi-tile__label">After-hours commits</span>
             <div class="ov-kpi-tile__value-row">
-                <span class="@KpiValueClass(IsAfterHoursHigh(overview.Kpis.AfterHoursCommitShare))">@FormatShare(overview.Kpis.AfterHoursCommitShare)</span>
+                <span class="@KpiValueClass(IsAfterHoursHigh(overview.Kpis.AfterHoursCommitShare))">@DisplayFormat.FormatShare(overview.Kpis.AfterHoursCommitShare)</span>
                 <span class="ov-kpi-tile__unit">of commits</span>
             </div>
             <span class="ov-kpi-tile__note">threshold @ThresholdPercent()% · author-local time</span>
@@ -101,7 +101,7 @@ else
         <div class="ov-kpi-tile">
             <span class="ov-kpi-tile__label">After-hours PR activity</span>
             <div class="ov-kpi-tile__value-row">
-                <span class="@KpiValueClass(IsAfterHoursHigh(overview.Kpis.AfterHoursPrShare))">@FormatShare(overview.Kpis.AfterHoursPrShare)</span>
+                <span class="@KpiValueClass(IsAfterHoursHigh(overview.Kpis.AfterHoursPrShare))">@DisplayFormat.FormatShare(overview.Kpis.AfterHoursPrShare)</span>
                 <span class="ov-kpi-tile__unit">of PR events</span>
             </div>
             <span class="ov-kpi-tile__note">organisation time</span>
@@ -188,11 +188,11 @@ else
                         <td class="ov-table__num">@row.Reviews</td>
                         <td class="ov-table__num">@row.Comments</td>
                         <td>
-                            <div class="ov-ah-cell" title="@($"After-hours share: {FormatShare(row.AfterHoursShare)}")">
+                            <div class="ov-ah-cell" title="@($"After-hours share: {DisplayFormat.FormatShare(row.AfterHoursShare)}")">
                                 <div class="ov-bar-track">
                                     <div class="@BarFillClass(IsAfterHoursHigh(row.AfterHoursShare))" style="width:@(BarWidthPercent((row.AfterHoursShare ?? 0m) * 100m, 50m))%"></div>
                                 </div>
-                                <span class="@AhValueClass(IsAfterHoursHigh(row.AfterHoursShare))">@FormatShare(row.AfterHoursShare)</span>
+                                <span class="@AhValueClass(IsAfterHoursHigh(row.AfterHoursShare))">@DisplayFormat.FormatShare(row.AfterHoursShare)</span>
                             </div>
                         </td>
                         <td class="@SignalClass(row.SignalNote)">@row.SignalNote</td>
@@ -225,7 +225,7 @@ else
                             <div class="ov-team-bar">
                                 <div class="ov-team-bar__row">
                                     <span class="ov-team-bar__label">After-hours</span>
-                                    <span class="@TeamBarValueClass(IsTeamAfterHoursHigh(team))">@FormatShare(team.AfterHoursShare)</span>
+                                    <span class="@TeamBarValueClass(IsTeamAfterHoursHigh(team))">@DisplayFormat.FormatShare(team.AfterHoursShare)</span>
                                 </div>
                                 <div class="ov-bar-track">
                                     <div class="@BarFillClass(IsTeamAfterHoursHigh(team))" style="width:@(BarWidthPercent((team.AfterHoursShare ?? 0m) * 100m, 50m))%"></div>
@@ -362,30 +362,50 @@ else
         }
     }
 
-    private async Task LoadAsync()
+    private Task LoadAsync() => LoadCoreAsync(ct => OverviewService.GetAsync(State.Scope, State.PeriodDays, ct));
+
+    private Task OnRetryClicked() => LoadCoreAsync(ct => OverviewService.RefreshAsync(State.Scope, State.PeriodDays, ct));
+
+    /// <summary>
+    /// The single fetch-and-apply path shared by <see cref="LoadAsync"/> and <see cref="OnRetryClicked"/>
+    /// (they differ only in which <see cref="OverviewService"/> method <paramref name="fetch"/> calls).
+    /// Stale-load race guard: this call's own (scope, period, data-version) key is captured locally before
+    /// the fetch is awaited; if a newer load for a different key started while this one was in flight (the
+    /// user changed period or scope mid-load, or a background rate-limit retry bumped <c>DataVersion</c>),
+    /// <see cref="_loadedKey"/> will have moved on by the time this await completes, and this method drops
+    /// its own now-stale result on the floor rather than overwriting the UI with data for the wrong key. The
+    /// shared loading indicator is left alone in that case too — the newer in-flight load already owns it
+    /// and will clear it itself when it finishes.
+    /// </summary>
+    private async Task LoadCoreAsync(Func<CancellationToken, Task<OverviewResult>> fetch)
     {
-        var scope = State.Scope;
-        var periodDays = State.PeriodDays;
-        _loadedKey = (scope, periodDays, State.DataVersion);
+        var requestKey = (State.Scope, State.PeriodDays, State.DataVersion);
+        _loadedKey = requestKey;
         _lastResult = null;
         State.SetLoading(true);
 
         OverviewResult result;
         try
         {
-            result = await OverviewService.GetAsync(scope, periodDays, _cts.Token);
+            result = await fetch(_cts.Token);
         }
         finally
         {
-            State.SetLoading(false);
+            if (_loadedKey is { } currentKey && currentKey.Equals(requestKey))
+            {
+                State.SetLoading(false);
+            }
+        }
+
+        if (_loadedKey is not { } latestKey || !latestKey.Equals(requestKey))
+        {
+            return;
         }
 
         _lastResult = result;
         State.Apply(result.Source);
         StateHasChanged();
     }
-
-    private async Task OnRetryClicked() => await LoadAsync();
 
     private void OnProjectRowActivated(string projectName)
     {
@@ -415,9 +435,6 @@ else
         (int)Math.Round(WellnessOptionsAccessor.Value.OutOfHoursThreshold * 100m, MidpointRounding.AwayFromZero);
 
     private int SpreadThinThreshold() => WellnessOptionsAccessor.Value.SpreadThinThreshold;
-
-    private static string FormatShare(decimal? share) =>
-        share is { } value ? $"{Math.Round(value * 100m, MidpointRounding.AwayFromZero):0}%" : "—";
 
     private static string FormatPercent(decimal share) =>
         Math.Round(share * 100m, MidpointRounding.AwayFromZero).ToString("0", CultureInfo.InvariantCulture);
@@ -526,44 +543,4 @@ else
             : "tone service unavailable";
 
     private static string DeveloperDetailUrl(DeveloperLogin login) => $"/developer/{Uri.EscapeDataString(login.Value)}";
-
-    /// <summary>Up to two initials from a display name (first plus last word), for the avatar circle.</summary>
-    private static string Initials(string displayName)
-    {
-        var parts = displayName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-
-        if (parts.Length == 0)
-        {
-            return "?";
-        }
-
-        return parts.Length == 1
-            ? parts[0][..Math.Min(2, parts[0].Length)].ToUpperInvariant()
-            : $"{parts[0][0]}{parts[^1][0]}".ToUpperInvariant();
-    }
-
-    /// <summary>A deterministic HSL colour derived from the login, so the same person always gets the same avatar colour.</summary>
-    private static string AvatarColor(DeveloperLogin login)
-    {
-        var hue = ((StableHash(login.Value) % 360) + 360) % 360;
-        return $"hsl({hue.ToString(CultureInfo.InvariantCulture)}, 55%, 45%)";
-    }
-
-    /// <summary>
-    /// A simple, process-independent string hash (unlike <see cref="string.GetHashCode()"/>, which is
-    /// randomised per process), so the avatar hue is stable across app restarts and test runs.
-    /// </summary>
-    private static int StableHash(string value)
-    {
-        unchecked
-        {
-            var hash = 23;
-            foreach (var c in value)
-            {
-                hash = hash * 31 + c;
-            }
-
-            return hash;
-        }
-    }
 }

@@ -87,7 +87,7 @@ else
                 {
                     <li class="checkin-entry">
                         <div class="checkin-entry__top">
-                            <div class="checkin-avatar" style="background-color:@AvatarColor(status.Developer.Login)" aria-hidden="true">@Initials(status.Developer.DisplayName)</div>
+                            <div class="checkin-avatar" style="background-color:@DisplayFormat.AvatarColor(status.Developer.Login)" aria-hidden="true">@DisplayFormat.Initials(status.Developer.DisplayName)</div>
                             <div class="checkin-entry__identity">
                                 <h2 class="checkin-entry__name">@status.Developer.DisplayName</h2>
                                 <p class="checkin-entry__team">@TeamName(status.Developer.Login, snapshot.Dataset.Teams)</p>
@@ -170,43 +170,42 @@ else
         }
     }
 
-    private async Task LoadAsync()
+    private Task LoadAsync() => LoadCoreAsync(ct => CheckInService.GetRosterAsync(State.Scope, State.PeriodDays, ct));
+
+    private Task OnRetryClicked() => LoadCoreAsync(ct => CheckInService.RefreshRosterAsync(State.Scope, State.PeriodDays, ct));
+
+    /// <summary>
+    /// The single fetch-and-apply path shared by <see cref="LoadAsync"/> and <see cref="OnRetryClicked"/>
+    /// (they differ only in which <see cref="CheckInService"/> method <paramref name="fetch"/> calls).
+    /// Stale-load race guard (see Overview.razor's <c>LoadCoreAsync</c> for the full rationale): drops the
+    /// result, and leaves the shared loading indicator alone, when a newer load for a different key started
+    /// while this one was still in flight.
+    /// </summary>
+    private async Task LoadCoreAsync(Func<CancellationToken, Task<CheckInRosterResult>> fetch)
     {
         var scope = State.Scope;
         var periodDays = State.PeriodDays;
-        _loadedKey = (scope, periodDays, State.DataVersion);
+        var requestKey = (scope, periodDays, State.DataVersion);
+        _loadedKey = requestKey;
         _lastRoster = null;
         State.SetLoading(true);
 
         CheckInRosterResult result;
         try
         {
-            result = await CheckInService.GetRosterAsync(scope, periodDays, _cts.Token);
+            result = await fetch(_cts.Token);
         }
         finally
         {
-            State.SetLoading(false);
+            if (_loadedKey is { } currentKey && currentKey.Equals(requestKey))
+            {
+                State.SetLoading(false);
+            }
         }
 
-        ApplyResult(scope, periodDays, result);
-    }
-
-    private async Task OnRetryClicked()
-    {
-        var scope = State.Scope;
-        var periodDays = State.PeriodDays;
-        _loadedKey = (scope, periodDays, State.DataVersion);
-        _lastRoster = null;
-        State.SetLoading(true);
-
-        CheckInRosterResult result;
-        try
+        if (_loadedKey is not { } latestKey || !latestKey.Equals(requestKey))
         {
-            result = await CheckInService.RefreshRosterAsync(scope, periodDays, _cts.Token);
-        }
-        finally
-        {
-            State.SetLoading(false);
+            return;
         }
 
         ApplyResult(scope, periodDays, result);
@@ -264,44 +263,4 @@ else
         teams.FirstOrDefault(t => t.Members.Contains(login))?.Name ?? "No team";
 
     private static string DeveloperDetailUrl(DeveloperLogin login) => $"/developer/{Uri.EscapeDataString(login.Value)}";
-
-    /// <summary>Up to two initials from a display name (first plus last word), for the avatar circle.</summary>
-    private static string Initials(string displayName)
-    {
-        var parts = displayName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-
-        if (parts.Length == 0)
-        {
-            return "?";
-        }
-
-        return parts.Length == 1
-            ? parts[0][..Math.Min(2, parts[0].Length)].ToUpperInvariant()
-            : $"{parts[0][0]}{parts[^1][0]}".ToUpperInvariant();
-    }
-
-    /// <summary>A deterministic HSL colour derived from the login, so the same person always gets the same avatar colour.</summary>
-    private static string AvatarColor(DeveloperLogin login)
-    {
-        var hue = ((StableHash(login.Value) % 360) + 360) % 360;
-        return $"hsl({hue.ToString(CultureInfo.InvariantCulture)}, 55%, 45%)";
-    }
-
-    /// <summary>
-    /// A simple, process-independent string hash (unlike <see cref="string.GetHashCode()"/>, which is
-    /// randomised per process), so the avatar hue is stable across app restarts and test runs.
-    /// </summary>
-    private static int StableHash(string value)
-    {
-        unchecked
-        {
-            var hash = 23;
-            foreach (var c in value)
-            {
-                hash = hash * 31 + c;
-            }
-
-            return hash;
-        }
-    }
 }

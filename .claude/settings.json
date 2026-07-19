@@ -1,5 +1,22 @@
 {
   "model": "claude-fable-5",
   "effortLevel": "xhigh",
-  "alwaysThinkingEnabled": true
+  "alwaysThinkingEnabled": true,
+  "env": {
+    "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "powershell",
+            "command": "Write-Output '{\"terminalSequence\":\"\\u001b]0;Developer Wellness\\u0007\"}'",
+            "statusMessage": "Setting terminal title"
+          }
+        ]
+      }
+    ]
+  }
 }

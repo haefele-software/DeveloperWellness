@@ -31,6 +31,7 @@ public class DashboardQueryServiceConcurrencyTests
         events: [],
         weeklyCommitCounts: [],
         coveredProjectNames: [],
+        linesChangedByAuthor: new Dictionary<DeveloperLogin, int>(),
         loadedAt: loadedAt,
         isDemoData: false);
 

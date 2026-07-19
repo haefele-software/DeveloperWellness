@@ -212,6 +212,7 @@ public sealed record ActivityDataset
         IReadOnlyList<ActivityEvent> events,
         IReadOnlyList<int> weeklyCommitCounts,
         IReadOnlyList<string> coveredProjectNames,
+        IReadOnlyDictionary<DeveloperLogin, int> linesChangedByAuthor,
         DateTimeOffset loadedAt,
         bool isDemoData)
     {
@@ -221,6 +222,7 @@ public sealed record ActivityDataset
         Events = events ?? throw new ArgumentNullException(nameof(events));
         WeeklyCommitCounts = weeklyCommitCounts ?? throw new ArgumentNullException(nameof(weeklyCommitCounts));
         CoveredProjectNames = coveredProjectNames ?? throw new ArgumentNullException(nameof(coveredProjectNames));
+        LinesChangedByAuthor = linesChangedByAuthor ?? throw new ArgumentNullException(nameof(linesChangedByAuthor));
         LoadedAt = loadedAt;
         IsDemoData = isDemoData;
     }
@@ -242,6 +244,17 @@ public sealed record ActivityDataset
 
     /// <summary>The names of the projects actually covered by this fetch (post repo-cap).</summary>
     public IReadOnlyList<string> CoveredProjectNames { get; }
+
+    /// <summary>
+    /// Per-author total lines changed (additions plus deletions) for the period — a documented
+    /// approximation, not an exact count: summed from GitHub's weekly contributor-statistics buckets
+    /// (<c>GET /repos/{owner}/{repo}/stats/contributors</c>), which cover only the default branch's history
+    /// and bucket weeks starting Sunday rather than aligning exactly to <see cref="Period.Start"/> and
+    /// <see cref="Period.End"/>; a week is included whenever its 7-day window overlaps the period at all.
+    /// Empty exactly when the statistics endpoint was unavailable for every covered repository, in which
+    /// case callers should treat lines-changed as unknown rather than zero.
+    /// </summary>
+    public IReadOnlyDictionary<DeveloperLogin, int> LinesChangedByAuthor { get; }
 
     /// <summary>When this dataset was fetched; feeds the freshness line and rate-limit banner (FR-011).</summary>
     public DateTimeOffset LoadedAt { get; }

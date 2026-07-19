@@ -74,7 +74,7 @@ public sealed class DashboardState
     /// <summary>True while the shown dataset came from the demo adapter rather than live GitHub (FR-013).</summary>
     public bool IsDemoData { get; private set; }
 
-    /// <summary>True while a page-level data fetch is in flight; drives the shell's slim progress bar under the top bar. No page sets this yet — it is a hook for pages to adopt.</summary>
+    /// <summary>True while a page-level data fetch is in flight; drives the shell's slim progress bar under the top bar.</summary>
     public bool IsLoading { get; private set; }
 
     /// <summary>

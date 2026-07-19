@@ -96,7 +96,7 @@ else
                         {
                             <li class="contributor-list__item">
                                 <div class="contributor-list__identity">
-                                    <div class="contributor-list__avatar" style="background-color:@AvatarColor(summary.Developer.Login)" aria-hidden="true">@Initials(summary.Developer.DisplayName)</div>
+                                    <div class="contributor-list__avatar" style="background-color:@DisplayFormat.AvatarColor(summary.Developer.Login)" aria-hidden="true">@DisplayFormat.Initials(summary.Developer.DisplayName)</div>
                                     <a class="contributor-list__name" href="@DeveloperDetailUrl(summary.Developer.Login)">@summary.Developer.DisplayName</a>
                                 </div>
                                 <span class="contributor-list__activity">@BuildActivityLine(summary)</span>
@@ -191,45 +191,40 @@ else
         }
     }
 
-    private async Task LoadAsync()
+    private Task LoadAsync() => LoadCoreAsync(ct => QueryService.GetAsync(ScopeKey.Project(Name), State.PeriodDays, ct));
+
+    private Task OnRetryClicked() => LoadCoreAsync(ct => QueryService.RefreshAsync(ScopeKey.Project(Name), State.PeriodDays, ct));
+
+    /// <summary>
+    /// The single fetch-and-apply path shared by <see cref="LoadAsync"/> and <see cref="OnRetryClicked"/>
+    /// (they differ only in which <see cref="DashboardQueryService"/> method <paramref name="fetch"/>
+    /// calls). Stale-load race guard (see Overview.razor's <c>LoadCoreAsync</c> for the full rationale):
+    /// drops the result, and leaves the shared loading indicator alone, when a newer load for a different
+    /// key started while this one was still in flight.
+    /// </summary>
+    private async Task LoadCoreAsync(Func<CancellationToken, Task<DashboardResult>> fetch)
     {
-        var name = Name;
-        var periodDays = State.PeriodDays;
-        _loadedKey = (name, periodDays, State.DataVersion);
+        var requestKey = (Name, State.PeriodDays, State.DataVersion);
+        _loadedKey = requestKey;
         _lastResult = null;
         State.SetLoading(true);
 
         DashboardResult result;
         try
         {
-            result = await QueryService.GetAsync(ScopeKey.Project(name), periodDays, _cts.Token);
+            result = await fetch(_cts.Token);
         }
         finally
         {
-            State.SetLoading(false);
+            if (_loadedKey is { } currentKey && currentKey.Equals(requestKey))
+            {
+                State.SetLoading(false);
+            }
         }
 
-        _lastResult = result;
-        State.Apply(result);
-        StateHasChanged();
-    }
-
-    private async Task OnRetryClicked()
-    {
-        var name = Name;
-        var periodDays = State.PeriodDays;
-        _loadedKey = (name, periodDays, State.DataVersion);
-        _lastResult = null;
-        State.SetLoading(true);
-
-        DashboardResult result;
-        try
+        if (_loadedKey is not { } latestKey || !latestKey.Equals(requestKey))
         {
-            result = await QueryService.RefreshAsync(ScopeKey.Project(name), periodDays, _cts.Token);
-        }
-        finally
-        {
-            State.SetLoading(false);
+            return;
         }
 
         _lastResult = result;
@@ -249,43 +244,4 @@ else
     private static string ContribNote(int flaggedCount, int totalCount) =>
         flaggedCount > 0 ? $"{flaggedCount} of {totalCount} carry a flag in this scope" : "no flags in this scope";
 
-    /// <summary>Up to two initials from a display name (first plus last word), for the contributor avatar circle. Matches CheckIns.razor's roster avatars.</summary>
-    private static string Initials(string displayName)
-    {
-        var parts = displayName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-
-        if (parts.Length == 0)
-        {
-            return "?";
-        }
-
-        return parts.Length == 1
-            ? parts[0][..Math.Min(2, parts[0].Length)].ToUpperInvariant()
-            : $"{parts[0][0]}{parts[^1][0]}".ToUpperInvariant();
-    }
-
-    /// <summary>A deterministic HSL colour derived from the login, so the same person always gets the same avatar colour. Matches CheckIns.razor's roster avatars.</summary>
-    private static string AvatarColor(DeveloperLogin login)
-    {
-        var hue = ((StableHash(login.Value) % 360) + 360) % 360;
-        return $"hsl({hue.ToString(CultureInfo.InvariantCulture)}, 55%, 45%)";
-    }
-
-    /// <summary>
-    /// A simple, process-independent string hash (unlike <see cref="string.GetHashCode()"/>, which is
-    /// randomised per process), so the avatar hue is stable across app restarts and test runs.
-    /// </summary>
-    private static int StableHash(string value)
-    {
-        unchecked
-        {
-            var hash = 23;
-            foreach (var c in value)
-            {
-                hash = hash * 31 + c;
-            }
-
-            return hash;
-        }
-    }
 }

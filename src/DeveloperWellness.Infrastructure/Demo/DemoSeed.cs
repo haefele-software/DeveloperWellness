@@ -136,6 +136,7 @@ internal static class DemoSeed
         var events = BuildEvents(period);
 
         var (scopedProjects, coveredNames, scopedEvents) = ApplyScope(scope, projects, events);
+        var linesChangedByAuthor = BuildLinesChangedByAuthor(scopedEvents);
 
         return new ActivityDataset(
             roster: roster,
@@ -144,8 +145,58 @@ internal static class DemoSeed
             events: scopedEvents,
             weeklyCommitCounts: WeeklyCommitCountsSeries,
             coveredProjectNames: coveredNames,
+            linesChangedByAuthor: linesChangedByAuthor,
             loadedAt: DateTimeOffset.UtcNow,
             isDemoData: true);
+    }
+
+    /// <summary>
+    /// Synthesizes deterministic per-author lines-changed totals (commit-size/volume metric) from the
+    /// already-generated, already-scoped commit events: each matched author's total is their deduped commit
+    /// count times a fixed per-login factor in [40, 120], so the same login always produces the same
+    /// lines-changed figure. Deliberately not <see cref="string.GetHashCode()"/>-based (that hash is
+    /// randomised per process in .NET, unlike this fixed djb2-style walk), so every existing demo assertion
+    /// stays stable across app restarts and test runs, exactly as every other seeded figure in this class
+    /// already must be.
+    /// </summary>
+    private static IReadOnlyDictionary<DeveloperLogin, int> BuildLinesChangedByAuthor(IReadOnlyList<ActivityEvent> events)
+    {
+        var seenShas = new HashSet<string>(StringComparer.Ordinal);
+        var commitCountsByAuthor = new Dictionary<DeveloperLogin, int>();
+
+        foreach (var activityEvent in events)
+        {
+            if (activityEvent is not CommitEvent commit || commit.Author.IsUnmatched || !seenShas.Add(commit.Sha))
+            {
+                continue;
+            }
+
+            commitCountsByAuthor[commit.Author] = commitCountsByAuthor.GetValueOrDefault(commit.Author) + 1;
+        }
+
+        return commitCountsByAuthor.ToDictionary(pair => pair.Key, pair => pair.Value * LinesPerCommitFactor(pair.Key));
+    }
+
+    /// <summary>A fixed, deterministic lines-per-commit multiplier in [40, 120] derived from the login text.</summary>
+    private static int LinesPerCommitFactor(DeveloperLogin login) => 40 + (((StableHash(login.Value) % 81) + 81) % 81);
+
+    /// <summary>
+    /// A simple, process-independent string hash (unlike <see cref="string.GetHashCode()"/>, which is
+    /// randomised per process), so <see cref="LinesPerCommitFactor"/> is stable across app restarts and
+    /// test runs.
+    /// </summary>
+    private static int StableHash(string value)
+    {
+        unchecked
+        {
+            var hash = 23;
+            foreach (var c in value)
+            {
+                hash = hash * 31 + c;
+            }
+
+            return hash;
+        }
     }
 
     // ---------------------------------------------------------------------------------------------

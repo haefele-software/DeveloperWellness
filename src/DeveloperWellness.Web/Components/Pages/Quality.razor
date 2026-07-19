@@ -11,7 +11,7 @@
 <div class="quality-page">
     <div class="quality-head">
         <h1 class="quality-headline">Quality vs quantity</h1>
-        <p class="quality-subhead">Volume beside rework proxies — no score, no index, no ranking. Shown only for people with at least 3 PRs this period.</p>
+        <p class="quality-subhead">Volume — including how much code changed, not just commit counts — shown beside rework proxies, no score, no index, no ranking. Shown only for people with at least 3 PRs this period.</p>
     </div>
 
     @if (_lastResult is null)
@@ -24,6 +24,7 @@
                         <th scope="col">Developer</th>
                         <th scope="col">Commits</th>
                         <th scope="col">PRs opened</th>
+                        <th scope="col" title="Added plus deleted lines on the default branch this period">Lines changed</th>
                         <th scope="col">Changes-requested share</th>
                         <th scope="col">Avg review rounds</th>
                         <th scope="col">Signal</th>
@@ -33,7 +34,7 @@
                     @for (var i = 0; i < 5; i++)
                     {
                         <tr class="skeleton-row">
-                            <td colspan="6">&nbsp;</td>
+                            <td colspan="7">&nbsp;</td>
                         </tr>
                     }
                 </tbody>
@@ -78,6 +79,7 @@
                     <col style="width:190px" />
                     <col style="width:90px" />
                     <col style="width:90px" />
+                    <col style="width:130px" />
                     <col style="width:170px" />
                     <col style="width:150px" />
                     <col />
@@ -87,6 +89,7 @@
                         <th scope="col">Developer</th>
                         <th scope="col">Commits</th>
                         <th scope="col">PRs opened</th>
+                        <th scope="col" title="Added plus deleted lines on the default branch this period">Lines changed</th>
                         <th scope="col">Changes-requested share</th>
                         <th scope="col">Avg review rounds</th>
                         <th scope="col">Signal</th>
@@ -98,14 +101,15 @@
                         <tr>
                             <td>
                                 <span class="quality-dev-cell">
-                                    <span class="quality-avatar" style="background-color:@AvatarColor(row.Developer.Login)" aria-hidden="true">@Initials(row.Developer.DisplayName)</span>
+                                    <span class="quality-avatar" style="background-color:@DisplayFormat.AvatarColor(row.Developer.Login)" aria-hidden="true">@DisplayFormat.Initials(row.Developer.DisplayName)</span>
                                     <a href="@DeveloperDetailUrl(row.Developer.Login)">@row.Developer.DisplayName</a>
                                 </span>
                             </td>
                             <td>@row.Snapshot.Commits</td>
                             <td>@row.Snapshot.PrsOpened</td>
+                            <td title="Added plus deleted lines on the default branch this period">@FormatLinesChanged(row.LinesChanged)</td>
                             <td class="@(IsChangesRequestedHigh(row.Snapshot.ChangesRequestedShare) ? "quality-share quality-share--high" : "quality-share")">
-                                @FormatShare(row.Snapshot.ChangesRequestedShare)
+                                @DisplayFormat.FormatShare(row.Snapshot.ChangesRequestedShare)
                             </td>
                             <td>@FormatRounds(row.Snapshot.AvgReviewRounds)</td>
                             <td>
@@ -191,22 +195,40 @@
         }
     }
 
-    private async Task LoadAsync()
+    private Task LoadAsync() => LoadCoreAsync(ct => QualityQuantityService.GetAsync(State.Scope, State.PeriodDays, ct));
+
+    private Task OnRetryClicked() => LoadCoreAsync(ct => QualityQuantityService.RefreshAsync(State.Scope, State.PeriodDays, ct));
+
+    /// <summary>
+    /// The single fetch-and-apply path shared by <see cref="LoadAsync"/> and <see cref="OnRetryClicked"/>
+    /// (they differ only in which <see cref="QualityQuantityService"/> method <paramref name="fetch"/>
+    /// calls). Stale-load race guard (see Overview.razor's <c>LoadCoreAsync</c> for the full rationale):
+    /// drops the result, and leaves the shared loading indicator alone, when a newer load for a different
+    /// key started while this one was still in flight.
+    /// </summary>
+    private async Task LoadCoreAsync(Func<CancellationToken, Task<QualityQuantityResult>> fetch)
     {
-        var scope = State.Scope;
-        var periodDays = State.PeriodDays;
-        _loadedKey = (scope, periodDays, State.DataVersion);
+        var requestKey = (State.Scope, State.PeriodDays, State.DataVersion);
+        _loadedKey = requestKey;
         _lastResult = null;
         State.SetLoading(true);
 
         QualityQuantityResult result;
         try
         {
-            result = await QualityQuantityService.GetAsync(scope, periodDays, _cts.Token);
+            result = await fetch(_cts.Token);
         }
         finally
         {
-            State.SetLoading(false);
+            if (_loadedKey is { } currentKey && currentKey.Equals(requestKey))
+            {
+                State.SetLoading(false);
+            }
+        }
+
+        if (_loadedKey is not { } latestKey || !latestKey.Equals(requestKey))
+        {
+            return;
         }
 
         _lastResult = result;
@@ -214,15 +236,13 @@
         StateHasChanged();
     }
 
-    private async Task OnRetryClicked() => await LoadAsync();
-
     private static string DeveloperDetailUrl(DeveloperLogin login) => $"/developer/{Uri.EscapeDataString(login.Value)}";
-
-    private static string FormatShare(decimal? share) =>
-        share is { } value ? $"{Math.Round(value * 100m, MidpointRounding.AwayFromZero):0}%" : "—";
 
     private static string FormatRounds(decimal? rounds) =>
         rounds is { } value ? value.ToString("0.0", CultureInfo.InvariantCulture) : "—";
+
+    private static string FormatLinesChanged(int? linesChanged) =>
+        linesChanged is { } value ? value.ToString("N0", CultureInfo.InvariantCulture) : "—";
 
     private bool IsChangesRequestedHigh(decimal? share) =>
         share is { } value && value > WellnessOptionsAccessor.Value.ChangesRequestedThreshold;
@@ -235,43 +255,4 @@
         _ => $"{string.Join(", ", names.Take(names.Count - 1))}, and {names[^1]}",
     };
 
-    /// <summary>Up to two initials from a display name (first plus last word), for the avatar circle.</summary>
-    private static string Initials(string displayName)
-    {
-        var parts = displayName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-
-        if (parts.Length == 0)
-        {
-            return "?";
-        }
-
-        return parts.Length == 1
-            ? parts[0][..Math.Min(2, parts[0].Length)].ToUpperInvariant()
-            : $"{parts[0][0]}{parts[^1][0]}".ToUpperInvariant();
-    }
-
-    /// <summary>A deterministic HSL colour derived from the login, so the same person always gets the same avatar colour.</summary>
-    private static string AvatarColor(DeveloperLogin login)
-    {
-        var hue = ((StableHash(login.Value) % 360) + 360) % 360;
-        return $"hsl({hue.ToString(CultureInfo.InvariantCulture)}, 55%, 45%)";
-    }
-
-    /// <summary>
-    /// A simple, process-independent string hash (unlike <see cref="string.GetHashCode()"/>, which is
-    /// randomised per process), so the avatar hue is stable across app restarts and test runs.
-    /// </summary>
-    private static int StableHash(string value)
-    {
-        unchecked
-        {
-            var hash = 23;
-            foreach (var c in value)
-            {
-                hash = hash * 31 + c;
-            }
-
-            return hash;
-        }
-    }
 }

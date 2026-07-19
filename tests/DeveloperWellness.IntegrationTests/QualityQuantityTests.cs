@@ -90,6 +90,13 @@ public class QualityQuantityTests
         Assert.Null(remy.Snapshot.ChangesRequestedShare);
         Assert.Null(remy.Snapshot.AvgReviewRounds);
         Assert.Null(remy.Flag);
+
+        // Remy's seeded events (BuildRemyOverworkPr) are all PR opens and reviews, no commits, so she is
+        // absent from the demo's lines-changed-by-author dictionary; since other seeded developers do carry
+        // commits, that dictionary is non-empty overall, so her lines-changed reads as a genuine zero rather
+        // than null (commit-size/volume metric, the "stats unavailable" case only applies when the whole
+        // dictionary is empty).
+        Assert.Equal(0, remy.LinesChanged);
     }
 
     [Fact]
@@ -113,5 +120,48 @@ public class QualityQuantityTests
 
         Assert.NotNull(result.Source.Snapshot);
         Assert.NotNull(result.Rows);
+    }
+
+    /// <summary>
+    /// Code-review finding: the Quality page's "Try again" action must bypass the cache like every sibling
+    /// page's retry path. <see cref="QualityQuantityService.RefreshAsync"/> routes through
+    /// <see cref="DashboardQueryService.RefreshAsync"/>, which evicts the cache before fetching, and
+    /// <see cref="DemoActivitySource"/> stamps a fresh <c>DateTimeOffset.UtcNow</c> onto every fetch it
+    /// serves — so a call after a warm <see cref="QualityQuantityService.GetAsync"/> call must observe a
+    /// strictly newer <c>LoadedAt</c> rather than the same cached one, while still computing a full row set.
+    /// </summary>
+    [Fact]
+    public async Task RefreshAsync_AfterAWarmGetAsyncCall_ForcesAFreshFetchWithANewerLoadedAt()
+    {
+        var service = BuildService();
+
+        var initial = await service.GetAsync(ScopeKey.Organisation, periodDays: 14, CancellationToken.None);
+        Assert.NotNull(initial.Source.Snapshot);
+
+        var refreshed = await service.RefreshAsync(ScopeKey.Organisation, periodDays: 14, CancellationToken.None);
+
+        Assert.NotNull(refreshed.Source.Snapshot);
+        Assert.True(refreshed.Source.Snapshot!.LoadedAt > initial.Source.Snapshot!.LoadedAt);
+        Assert.NotNull(refreshed.Rows);
+        Assert.NotEmpty(refreshed.Rows!);
+    }
+
+    /// <summary>
+    /// Demo lines-changed (commit-size/volume metric) is synthesized from each author's deduped commit
+    /// count times a fixed per-login factor (<c>DemoSeed.BuildLinesChangedByAuthor</c>), so River's total
+    /// must be positive (she has seeded commits) and identical across two entirely independent demo builds.
+    /// </summary>
+    [Fact]
+    public async Task GetAsync_OrganisationScope_RiverLinesChangedIsPositiveAndDeterministicAcrossFreshDemoBuilds()
+    {
+        var firstResult = await BuildService().GetAsync(ScopeKey.Organisation, periodDays: 14, CancellationToken.None);
+        var secondResult = await BuildService().GetAsync(ScopeKey.Organisation, periodDays: 14, CancellationToken.None);
+
+        var riverFirst = Assert.Single(firstResult.Rows!, row => row.Developer.Login == RiverLogin);
+        var riverSecond = Assert.Single(secondResult.Rows!, row => row.Developer.Login == RiverLogin);
+
+        Assert.NotNull(riverFirst.LinesChanged);
+        Assert.True(riverFirst.LinesChanged > 0);
+        Assert.Equal(riverFirst.LinesChanged, riverSecond.LinesChanged);
     }
 }
